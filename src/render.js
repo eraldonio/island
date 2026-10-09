@@ -9,6 +9,9 @@
 
 import { Z_MIN, Z_MAX, CHUNK, project, unproject, ISO } from './iso.js';
 import { PALETTE, PAPER } from './world.js';
+import { MODELS, modelSize, modelBoxes } from './models.js';
+
+const MODELS_BY_ID = new Map(MODELS.map((m) => [m.id, m]));
 
 const KEY_SHIFT = 1048576;    // 2^20, the index field of the packed sort key
 const KEY_MASK = KEY_SHIFT - 1;
@@ -99,7 +102,7 @@ function boxOutline(P0, U, V, W) {
  * renderer has its own batched, culled path; this one trades speed for being
  * obviously correct on any small voxel list.
  */
-export function paintBoxes(ctx, boxes, { view, scale, ox, oy, colors }) {
+export function paintBoxes(ctx, boxes, { view, scale, ox, oy, colors, unit = 1 }) {
   const { U, V, W } = basisOf(view, scale);
   const order = boxes
     .map((b) => ({ b, d: b.x * view.dx + b.y * view.dy + b.z * view.dz }))
@@ -110,11 +113,16 @@ export function paintBoxes(ctx, boxes, { view, scale, ox, oy, colors }) {
   ctx.lineJoin = 'round';
   let style = '';
   for (const box of order) {
+    // A box may carry its own size (a model's sub-block voxels do).
+    const u = box.u || unit;
+    const UU = u === 1 ? U : { x: U.x * u, y: U.y * u };
+    const VV = u === 1 ? V : { x: V.x * u, y: V.y * u };
+    const WW = u === 1 ? W : { x: W.x * u, y: W.y * u };
     const P0 = {
       x: ox + (box.x * view.cos - box.y * view.sin) * view.H * scale,
       y: oy + ((box.x * view.sin + box.y * view.cos) * view.D - box.z * view.C) * scale,
     };
-    const f = faceSet(P0, U, V, W, view);
+    const f = faceSet(P0, UU, VV, WW, view);
     const col = colors[box.mat] || colors[0];
     const faces = [[f.top, col.top]];
     if (view.faceX) faces.push([f.x, view.sx > 0 ? col.right : col.left]);
@@ -143,7 +151,7 @@ export class Renderer {
       raw: p.color,
     }));
     // Reused per-frame buffers (no allocation while panning).
-    this.buf = { keys: [], kinds: [], notes: [], xs: [], ys: [], zs: [], mats: [], masks: [], ax: [], ay: [] };
+    this.buf = { keys: [], kinds: [], notes: [], xs: [], ys: [], zs: [], mats: [], masks: [], ax: [], ay: [], scales: [] };
     this.resize();
   }
 
@@ -258,6 +266,7 @@ export class Renderer {
     g.keys.length = 0; g.kinds.length = 0; g.notes.length = 0;
     g.xs.length = 0; g.ys.length = 0; g.zs.length = 0;
     g.mats.length = 0; g.masks.length = 0; g.ax.length = 0; g.ay.length = 0;
+    g.scales.length = 0;
 
     const world = this.world;
     const v = this.v;
@@ -303,7 +312,7 @@ export class Renderer {
         g.xs.push(x); g.ys.push(y); g.zs.push(z);
         g.mats.push(mat);
         g.masks.push((up ? 1 : 0) | (rt ? 2 : 0) | (lf ? 4 : 0));
-        g.ax.push(ax); g.ay.push(ay);
+        g.ax.push(ax); g.ay.push(ay); g.scales.push(1);
         g.kinds.push(0); g.notes.push(0);
         g.keys.push(depthKey(x, y, z, v, n));
         if (++n >= KEY_MASK) break outer;
@@ -329,9 +338,44 @@ export class Renderer {
       g.xs.push(note.x); g.ys.push(note.y); g.zs.push(L);
       g.mats.push(0); g.masks.push(0);
       g.kinds.push(1); g.notes.push(ni);
-      g.ax.push(a.x); g.ay.push(a.y);
+      g.ax.push(a.x); g.ay.push(a.y); g.scales.push(1);
       g.keys.push(depthKey(note.x + note.w, note.y + note.h, L, v, n));
       if (++n >= KEY_MASK) break;
+    }
+
+    // Placed models: expanded into their own sub-block boxes so a block in front
+    // of one covers exactly the part it overlaps. The prop's bounding box is
+    // culled once, then every box gets its own painter key.
+    const props = world.props;
+    for (let pi = 0; pi < props.length; pi++) {
+      const prop = props[pi];
+      const model = MODELS_BY_ID.get(prop.model);
+      if (!model) continue;
+      const size = modelSize(model);
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const dx of [0, size.w]) {
+        for (const dy of [0, size.h]) {
+          for (const dz of [0, size.hz]) {
+            const p = this.toScreen(prop.x + dx, prop.y + dy, prop.z + dz);
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.y > maxY) maxY = p.y;
+          }
+        }
+      }
+      if (maxX < -2 || minX > W_ + 2 || maxY < -2 || minY > H_ + 2) continue;
+
+      for (const box of modelBoxes(model, prop.x, prop.y, prop.z)) {
+        const ax = (box.x * v.cos - box.y * v.sin) * v.H * scale + ox;
+        const ay = ((box.x * v.sin + box.y * v.cos) * v.D - box.z * v.C) * scale + oy;
+        g.xs.push(0); g.ys.push(0); g.zs.push(0);
+        g.mats.push(box.mat); g.masks.push(0);
+        g.kinds.push(2); g.notes.push(0);
+        g.ax.push(ax); g.ay.push(ay); g.scales.push(box.u);
+        g.keys.push(depthKey(box.x, box.y, box.z, v, n));
+        if (++n >= KEY_MASK) break;
+      }
     }
     g.keys.sort((a, b) => a - b);
   }
@@ -348,12 +392,19 @@ export class Renderer {
 
     for (let i = 0; i < keys.length; i++) {
       const k = keys[i] & KEY_MASK;
+      const kind = g.kinds[k];
       const P0 = { x: g.ax[k], y: g.ay[k] };
-      if (g.kinds[k] === 1) { this.drawNoteTile(ctx, this.world.notes[g.notes[k]], g.zs[k], U, V); continue; }
+      if (kind === 1) { this.drawNoteTile(ctx, this.world.notes[g.notes[k]], g.zs[k], U, V); continue; }
+
+      // A placed model's boxes are a fraction of a block, so its basis is scaled.
+      const u = kind === 2 ? g.scales[k] : 1;
+      const UU = u === 1 ? U : { x: U.x * u, y: U.y * u };
+      const VV = u === 1 ? V : { x: V.x * u, y: V.y * u };
+      const WW = u === 1 ? W : { x: W.x * u, y: W.y * u };
 
       const m = g.masks[k];
       const col = this.colors[g.mats[k]];
-      const f = faceSet(P0, U, V, W, v);
+      const f = faceSet(P0, UU, VV, WW, v);
 
       if (!(m & 1)) {                             // top
         if (col.top !== style) { ctx.fillStyle = style = col.top; ctx.strokeStyle = style; }

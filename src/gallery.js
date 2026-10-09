@@ -1,7 +1,7 @@
 // Model gallery: the panel of low-poly prefabs, each previewed with the same
 // projection and palette the world uses, so a card shows what you will get.
 
-import { MODELS, modelSize } from './models.js';
+import { MODELS, modelSize, modelBoxes } from './models.js';
 import { paintBoxes, shade } from './render.js';
 import { project, ISO } from './iso.js';
 import { PALETTE } from './world.js';
@@ -70,14 +70,12 @@ export class Gallery {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, THUMB, THUMB);
 
-    const { w, h } = modelSize(model);
-    let top = 1;
-    for (const [, , z] of model.voxels) if (z + 1 > top) top = z + 1;
+    const { w, h, hz } = modelSize(model);
 
     const corners = [];
     for (const a of [0, w]) {
       for (const b of [0, h]) {
-        for (const c of [0, top]) corners.push(project(a, b, c, ISO));
+        for (const c of [0, hz]) corners.push(project(a, b, c, ISO));
       }
     }
     const xs = corners.map((p) => p.x);
@@ -90,8 +88,6 @@ export class Gallery {
     const ox = (THUMB - spanX * scale) / 2 - minX * scale;
     const oy = (THUMB - spanY * scale) / 2 - minY * scale;
 
-    paintBoxes(ctx, model.voxels.map(([x, y, z, mat]) => ({ x, y, z, mat })), {
-      view: ISO, scale, ox, oy, colors: this.colors,
-    });
+    paintBoxes(ctx, modelBoxes(model, 0, 0, 0), { view: ISO, scale, ox, oy, colors: this.colors });
   }
 }

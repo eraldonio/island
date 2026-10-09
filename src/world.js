@@ -26,6 +26,7 @@ export class World {
     this.chunks = new Map();   // "cx:cy" -> { cx, cy, data: Map<localKey, matId> }
     this.tops = new Map();     // "x,y"   -> highest z (for column ops)
     this.notes = [];
+    this.props = [];          // placed models: { id, model, x, y, z }
     this.undoStack = [];
     this.redoStack = [];
     this.stroke = null;
@@ -179,7 +180,37 @@ export class World {
         if (n) Object.assign(n, back ? cmd.before : cmd.after);
         break;
       }
+      case 'prop-add':
+        if (back) this._detachProp(cmd.prop.id); else this.props.push(cmd.prop);
+        break;
+      case 'prop-del':
+        if (back) this.props.splice(Math.min(cmd.index, this.props.length), 0, cmd.prop);
+        else this._detachProp(cmd.prop.id);
+        break;
     }
+  }
+
+  /* ── placed models ─────────────────────────────────────────────────── */
+
+  _detachProp(id) {
+    const i = this.props.findIndex((p) => p.id === id);
+    if (i >= 0) this.props.splice(i, 1);
+  }
+
+  /**
+   * A model is placed as a prop: the block column it stands on is snapped to the
+   * grid, while its own geometry stays at the model's sub-block resolution.
+   */
+  addProp(prop) {
+    this.props.push(prop);
+    this._commit({ kind: 'prop-add', prop });
+  }
+
+  removeProp(id) {
+    const i = this.props.findIndex((p) => p.id === id);
+    if (i < 0) return;
+    const [prop] = this.props.splice(i, 1);
+    this._commit({ kind: 'prop-del', prop, index: i });
   }
 
   /* ── notes ─────────────────────────────────────────────────────────── */
@@ -225,9 +256,10 @@ export class World {
       }
     }
     return {
-      version: 2,
+      version: 3,
       voxels,
       notes: this.notes.map((n) => ({ id: n.id, x: n.x, y: n.y, w: n.w, h: n.h, color: n.color, html: n.html })),
+      props: this.props.map((p) => ({ id: p.id, model: p.model, x: p.x, y: p.y, z: p.z })),
     };
   }
 
@@ -235,12 +267,25 @@ export class World {
     this.chunks.clear();
     this.tops.clear();
     this.notes.length = 0;
+    this.props.length = 0;
     this.undoStack.length = 0;
     this.redoStack.length = 0;
     this.stroke = null;
     this.count = 0;
     for (const [x, y, z, mat] of data.voxels || []) this.set(x, y, z, mat);
     for (const n of data.notes || []) this.notes.push(normalizeNote(n));
+    // Unknown model ids are kept: the renderer simply skips them, which beats
+    // silently dropping someone's work on load.
+    for (const p of data.props || []) {
+      if (!p || typeof p.model !== 'string') continue;
+      this.props.push({
+        id: p.id || uid(),
+        model: p.model,
+        x: Math.round(Number(p.x) || 0),
+        y: Math.round(Number(p.y) || 0),
+        z: Math.round(Number(p.z) || 0),
+      });
+    }
     this.rev++;
   }
 }

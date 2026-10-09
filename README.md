@@ -25,7 +25,8 @@ which browsers refuse to load from the filesystem.
 | --- | --- |
 | Apply the current tool | click, or drag — one action per block the cursor moves into (holding still does nothing more) |
 | Build / dig / paint / note / place / pan | `B` `D` `P` `N` `M` `H` |
-| Place a model | `M` (or the place tool) opens the gallery, pick a prefab, then click the world: it rests on that column's surface and takes its own footprint |
+| Place a model | `M` (or the place tool) opens the gallery, pick a prefab, then click the world: it claims its own whole-block footprint, centred on that column and resting on its surface |
+| Remove a placed model | dig it (undo brings it back) |
 | Pick a material | `1` … `9` |
 | Brush size (1×1, 3×3, 5×5) | `[` `]` |
 | Place a note | the note tool, or `Shift`+click with any tool |
@@ -124,14 +125,27 @@ stored. Pasted HTML is passed through a tag/attribute whitelist
 (`sanitizeHtml`) before it ever reaches the model, as is anything loaded from
 disk or `localStorage`.
 
-**Prefab models.** `src/models.js` is a small library of low-poly voxel models
-(tree, pine, bush, house, duck, boat, boulder, cactus, well, campfire, mushroom,
-snowman, ruins) — each just a list of `[x, y, z, mat]` cells with the origin at
-its min corner, so the footprint is derived, never declared. The gallery draws
-each one with the same projection and palette the world uses (a static painter
-shares the renderer's face geometry), and stamping places the whole model as a
-single undoable edit: footprint centred on the clicked column, resting on that
-column's surface, following the face you click exactly like a single block does.
+**Prefab models.** `src/models.js` is a small library of low-poly models (tree,
+pine, bush, house, duck, boat, boulder, cactus, well, campfire, mushroom,
+snowman, ruins). Each is authored at its **own sub-block resolution** — a model
+stores mini-voxels plus a `res` (mini-voxels per map block), so a duck and a
+house are built from voxels of the same visual size but claim very different
+amounts of ground. Sizes are proportional on purpose: the duck is about one
+block, the house about four.
+
+The map grid is used only for *placement*: `modelSize()` derives how many whole
+blocks a model claims (`ceil(bbox / res)`), the model is centred inside that
+footprint and rests on the clicked column's surface, and the hover ghost shows
+exactly those blocks. Nothing about the map's voxel size leaks into the model's
+shape.
+
+Placed models are **props**, not voxels: `{ id, model, x, y, z }` — a model id
+plus the block column it stands on. The renderer expands each prop into its
+mini-boxes (scaled through the same `U`, `V`, `W` basis as everything else) and
+gives every box its own painter key, so a block in front of a model covers
+exactly the part it overlaps. Placement and removal are single undoable steps —
+dig a model to take it away. The gallery draws the same geometry with a static
+painter that shares the renderer's face maths.
 
 **Undo/redo** is a command stack of edits (`before`/`after` per voxel, or a note
 patch). A drag stroke is grouped into one command via `beginStroke`/`endStroke`,
@@ -174,6 +188,10 @@ footprint, `w,h` its size in blocks, `html` the sanitised rich text. Older
 saves (which stored a floating pin: a fractional centre plus an explicit `z`)
 are migrated on load to the corner cell plus a default tile size.
 
+A placed model is `{ id, model, x, y, z }`: a model id from the library plus the
+block column it stands on. Its geometry is regenerated from the library on every
+frame, so a save only stores which model and where.
+
 ## Limits
 
 * The world is bounded to `z = 0…128`; x and y are unbounded.
@@ -183,6 +201,9 @@ are migrated on load to the corner cell plus a default tile size.
 * A tile is rigid: it rests on the highest block under its footprint, so on very
   uneven ground it bridges dips. Terrain in front still occludes it, and a note
   that ends up mostly hidden fades to a ghost rather than disappearing.
+* A placed model claims whole blocks but draws at its own resolution, so a small
+  model leaves most of its claimed block empty. Its bounding box is what occludes
+  and what a dig removes, not the fine geometry.
 * Text capacity is set by the footprint — roughly two characters per block.
   Long notes want a bigger tile (drag a corner) or the pop-up editor, which
   always shows everything.

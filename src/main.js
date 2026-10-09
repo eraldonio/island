@@ -3,11 +3,13 @@
 import { World, PALETTE, PAPER, seedStarter, uid, NOTE_NEW } from './world.js';
 import { Renderer } from './render.js';
 import { Notes, sanitizeHtml } from './notes.js';
-import { raycast, viewOf, ISO, SPIN0, TILT0, TILT_MAX } from './iso.js';
+import { raycast, unproject, viewOf, ISO, Z_MAX, SPIN0, TILT0, TILT_MAX } from './iso.js';
 import { targetsFor, BRUSHES } from './tools.js';
 import { Gallery } from './gallery.js';
-import { modelCells } from './models.js';
+import { MODELS, modelSize } from './models.js';
 import * as store from './store.js';
+
+const MODELS_BY_ID = new Map(MODELS.map((m) => [m.id, m]));
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('stage');
@@ -73,9 +75,22 @@ window.addEventListener('pointermove', (e) => {
 
 const solid = (x, y, z) => world.get(x, y, z) !== undefined;
 
-function pickAt(clientX, clientY) {
+/**
+ * @param {Map<string, number|undefined>} [override] cells to read from their
+ *   pre-stroke state instead of the live world, so a drag picks against the
+ *   terrain as it was before the stroke rather than against what it has just
+ *   built.
+ */
+function pickAt(clientX, clientY, override) {
   const r = canvas.getBoundingClientRect();
   const iso = renderer.toIso(clientX - r.left, clientY - r.top);
+  const solid = override
+    ? (x, y, z) => {
+      const k = x + ',' + y + ',' + z;
+      if (override.has(k)) return override.get(k) !== undefined;
+      return world.get(x, y, z) !== undefined;
+    }
+    : (x, y, z) => world.get(x, y, z) !== undefined;
   return raycast(iso.ix, iso.iy, solid, cam.view || ISO);
 }
 
@@ -90,7 +105,16 @@ function ghostVisual(hit) {
   const outline = 'rgba(255,255,255,0.6)';
 
   if (state.tool === 'stamp') {
-    return { hit, cells: stampCells(hit), tile: null, fill: 'rgba(255,255,255,0.30)', outline, cursor: null };
+    const t = stampTarget(hit);
+    // Show the blocks the model claims, since that is what placement snaps to.
+    return {
+      hit,
+      cells: [],
+      tile: { x: t.x, y: t.y, w: t.size.w, h: t.size.h, level: t.z },
+      fill: 'rgba(255,255,255,0.22)',
+      outline,
+      cursor: null,
+    };
   }
 
   if (state.tool === 'note') {
@@ -211,9 +235,10 @@ function exec(cmd, val) {
 
 let mode = null;          // null | 'pan' | 'sculpt'
 let pan = null;
-let strokeKeys = null;
-let strokeColumn = null;  // "x,y" of the column the stroke last acted on
-let strokeAt = null;      // client point of that action
+let strokeKeys = null;    // voxel cells this stroke has already touched
+let strokeColumns = null; // "x,y" columns this stroke has already acted on
+let strokeUndo = null;    // "x,y,z" -> what was there before this stroke touched it
+let strokeAt = null;      // client point of the last action
 const pointers = new Map();
 let pinch = null;
 
@@ -221,30 +246,36 @@ function startSculpt(e) {
   canvas.setPointerCapture(e.pointerId);
   mode = 'sculpt';
   strokeKeys = new Set();
-  strokeColumn = null;
+  strokeColumns = new Set();
+  strokeUndo = new Map();
   strokeAt = null;
   world.beginStroke();
   sculptAt(e);
 }
 
 /**
- * One action per block the cursor moves *into*. Without this, holding the
- * button still keeps stacking blocks: the block just placed becomes the
- * topmost thing under the cursor, so the next pick targets the cell above it.
- * A small dead zone also absorbs jitter along a cell boundary.
+ * One action per block the stroke reaches, and every pick is made against the
+ * terrain as it was before the stroke started.
+ *
+ * Without that, a drag climbs: the cells the stroke has just placed become the
+ * topmost thing under the cursor, so the next pick targets the cell above them.
+ * It is worst with the 3x3 and 5x5 brushes, where the cursor sits over the middle
+ * of the patch it just made and the footprint walks up its own side. A column
+ * already acted on is skipped too, and a small dead zone absorbs jitter along a
+ * cell boundary.
  */
 function sculptAt(e) {
-  const hit = pickAt(e.clientX, e.clientY);
+  const hit = pickAt(e.clientX, e.clientY, strokeUndo);
   hover = hit;
 
   const column = hit.x + ',' + hit.y;
-  if (column === strokeColumn) { invalidate(); return; }
+  if (strokeColumns.has(column)) { invalidate(); return; }
   if (strokeAt) {
     const dx = e.clientX - strokeAt.x;
     const dy = e.clientY - strokeAt.y;
     if (dx * dx + dy * dy < 9) { invalidate(); return; }
   }
-  strokeColumn = column;
+  strokeColumns.add(column);
   strokeAt = { x: e.clientX, y: e.clientY };
 
   const cells = targetsFor(world, hit, state.tool, state.brush);
@@ -253,6 +284,7 @@ function sculptAt(e) {
     const k = c.x + ',' + c.y + ',' + c.z;
     if (strokeKeys.has(k)) continue;
     strokeKeys.add(k);
+    if (!strokeUndo.has(k)) strokeUndo.set(k, world.get(c.x, c.y, c.z));
     fresh.push(c);
   }
   if (fresh.length) {
@@ -266,43 +298,93 @@ function finishStroke(save) {
   if (mode === 'sculpt') {
     world.endStroke();
     strokeKeys = null;
-    strokeColumn = null;
+    strokeColumns = null;
+    strokeUndo = null;
     strokeAt = null;
     if (save) requestSave();
   }
   mode = null;
 }
 
-/* ── models ──────────────────────────────────────────────────────────── */
+/* ── placed models ───────────────────────────────────────────────────── */
 
 let gallery = null;
 
 /**
- * Where a stamped model lands: the column the click targets (the neighbour of a
- * side face, so a model placed against a wall stands beside it), resting on
- * that column's surface.
+ * Where a stamped model lands: the block column the click targets (the
+ * neighbour of a side face, so a model placed against a wall stands beside it),
+ * with the model's footprint centred on that column and resting on its surface.
+ * The grid decides the placement; the model keeps its own sub-block geometry.
  */
 function stampTarget(hit) {
+  const model = gallery && gallery.model;
+  const size = model ? modelSize(model) : { w: 1, h: 1, hz: 1 };
   const cx = hit.ground ? hit.x : hit.x + hit.nx;
   const cy = hit.ground ? hit.y : hit.y + hit.ny;
-  return { cx, cy, z: world.surfaceUnder(cx, cy, 1, 1) };
+  return {
+    size,
+    x: cx - ((size.w - 1) >> 1),
+    y: cy - ((size.h - 1) >> 1),
+    z: world.surfaceUnder(cx, cy, 1, 1),
+  };
 }
 
-/** The model's voxels in world cells, footprint centred on the clicked column. */
-function stampCells(hit) {
-  const model = gallery && gallery.model;
-  if (!model) return [];
-  const t = stampTarget(hit);
-  return modelCells(model, t.cx, t.cy, t.z);
-}
-
-/** Stamp the selected model: one undoable edit, overwriting whatever is there. */
+/** Place the selected model: one undoable edit. */
 function placeStamp(hit) {
-  const cells = stampCells(hit);
-  if (!cells.length) return;
-  world.apply(cells);
+  const model = gallery && gallery.model;
+  if (!model) return;
+  const t = stampTarget(hit);
+  world.addProp({ id: uid(), model: model.id, x: t.x, y: t.y, z: t.z });
   invalidate();
   requestSave();
+}
+
+/**
+ * The placed model the pointer ray reaches first, if it is in front of the
+ * terrain under the cursor. Ray/box slabs, compared against the terrain by the
+ * same view-space depth the painter uses.
+ */
+function propAt(clientX, clientY) {
+  if (!world.props.length) return null;
+  const r = canvas.getBoundingClientRect();
+  const view = cam.view || ISO;
+  const iso = renderer.toIso(clientX - r.left, clientY - r.top);
+  const start = unproject(iso.ix, iso.iy, Z_MAX + 1, view);
+  const p = { x: start.x, y: start.y, z: Z_MAX + 1 };
+  const len = Math.hypot(view.dx, view.dy, view.dz);
+  const d = { x: -view.dx / len, y: -view.dy / len, z: -view.dz / len };
+
+  let best = null;
+  let bestT = Infinity;
+  for (const prop of world.props) {
+    const model = MODELS_BY_ID.get(prop.model);
+    if (!model) continue;
+    const s = modelSize(model);
+    const lo = { x: prop.x, y: prop.y, z: prop.z };
+    const hi = { x: prop.x + s.w, y: prop.y + s.h, z: prop.z + s.hz };
+    let t0 = 0;
+    let t1 = Infinity;
+    let ok = true;
+    for (const axis of ['x', 'y', 'z']) {
+      if (Math.abs(d[axis]) < 1e-9) {
+        if (p[axis] < lo[axis] || p[axis] > hi[axis]) { ok = false; break; }
+        continue;
+      }
+      let ta = (lo[axis] - p[axis]) / d[axis];
+      let tb = (hi[axis] - p[axis]) / d[axis];
+      if (ta > tb) { const tmp = ta; ta = tb; tb = tmp; }
+      if (ta > t0) t0 = ta;
+      if (tb < t1) t1 = tb;
+      if (t0 > t1) { ok = false; break; }
+    }
+    if (ok && t0 < bestT) { bestT = t0; best = prop; }
+  }
+  if (!best) return null;
+
+  const hit = pickAt(clientX, clientY);
+  const depthOf = (x, y, z) => x * view.dx + y * view.dy + z * view.dz;
+  const front = depthOf(p.x + d.x * bestT, p.y + d.y * bestT, p.z + d.z * bestT);
+  return front >= depthOf(hit.x, hit.y, hit.z) - 1e-6 ? best : null;
 }
 
 function pinchState() {
@@ -345,6 +427,16 @@ canvas.addEventListener('pointerdown', (e) => {
   if (state.tool === 'stamp') {
     placeStamp(pickAt(e.clientX, e.clientY));
     return;
+  }
+  // Digging a placed model takes it away; undo brings it back.
+  if (state.tool === 'dig') {
+    const prop = propAt(e.clientX, e.clientY);
+    if (prop) {
+      world.removeProp(prop.id);
+      invalidate();
+      requestSave();
+      return;
+    }
   }
   startSculpt(e);
 });
