@@ -33,8 +33,9 @@ which browsers refuse to load from the filesystem.
 | Resize a note | drag a white corner handle — it snaps to whole blocks |
 | Move a note | drag its `⠿` grip onto another block |
 | Cycle paper colour / delete | `●` / `×` on the note |
-| Pan | `Space`+drag, middle-drag, right-drag, wheel, or the pan tool |
-| Zoom | `Ctrl`+wheel, `+` / `−`, or pinch on touch |
+| Pan | `Space`+drag, middle-drag, right-drag, `Shift`+wheel, or the pan tool |
+| Zoom | wheel (at the cursor), `Ctrl`+wheel, `+` / `−`, or pinch on touch |
+| Face the notes | `V`, or drag the view slider: the world rotates from the isometric default to straight down, so note writing reads head-on |
 | Centre the view | `0` |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Shift+Z` |
 | Help | `?` |
@@ -44,23 +45,33 @@ what makes the whole renderer cheap.
 
 ## How it works
 
-**Fixed-angle isometric projection.** Every world point maps to the screen with
-one linear equation (`src/iso.js`):
+**Parallel projection with a rotatable view.** Every world point maps to the
+screen with one linear equation (`src/iso.js`):
 
 ```
-screenX = (x - y) * 16
-screenY = (x + y) * 8 - z * 16
+screenX = (x cosθ - y sinθ) * H
+screenY = (x sinθ + y cosθ) * D - z * C
 ```
 
-Because the camera never rotates, that map is constant, and the view ray for any
-pixel is always the world vector `(-1,-1,-1)`. Two consequences fall out:
+θ is the view azimuth, D/H the ground foreshortening and C the height scale. The
+view slider moves them together from the isometric default (θ=45°, D/H=½,
+C=16 — the classic 2:1 look) to square-on and straight down (θ=0°, D=H, C=0),
+where the world axes lie on the screen axes and a note's writing is neither
+sheared nor squashed.
+
+Because the projection is linear at every angle, two things stay true:
 
 * **Picking is exact.** `raycast()` walks the voxel grid with an
-  Amanatides–Woo DDA from a plane above the world and returns the first solid
-  cell plus the face it entered — no raycast library, no mesh, no scene graph.
-* **Depth is an integer.** Painter's-algorithm order is just `x + y + z`, so the
-  visible set is sorted with one packed integer key per voxel instead of a
-  z-buffer.
+  Amanatides–Woo DDA along the view ray from a plane above the world, and
+  returns the first solid cell plus the face it entered — no raycast library, no
+  mesh, no scene graph. Only the step sizes change with the angle.
+* **Depth is one number.** Painter's-algorithm order is the dot product of a
+  cell with the view ray, so the visible set is sorted with one packed key per
+  voxel instead of a z-buffer.
+
+The renderer never hard-codes the isometric basis: it works from the three
+screen-space images of the world axes (`U`, `V`, `W`), which is also what makes
+the cube faces, the note quads and the ink's matrix rotate together.
 
 **Chunked sparse storage.** Blocks live in `Map`s keyed by 16×16 column chunks
 (`src/world.js`), so the world is unbounded on x/y with no allocation for empty
@@ -83,9 +94,11 @@ in two halves that share one affine map:
   thickness rim and a contact shadow so it reads as a solid slab rather than a
   decal.
 * The **ink** is a DOM element holding real `contenteditable` content, warped
-  into the ground plane with the same matrix as the projection
-  (`matrix(16,8,-16,8)` scaled), so it looks like writing on the paper while
-  keeping the native caret, selection, `Ctrl+B/I/U` and spellcheck.
+  into the ground plane with the projection's own matrix (its columns are the
+  screen-space images of the world x and y axes), so it looks like writing on
+  the paper while keeping the native caret, selection, `Ctrl+B/I/U` and
+  spellcheck — and it rotates with the view, reading head-on at the far end of
+  the slider.
 
 A tile rests on the highest block under its footprint, derived from the terrain
 every frame, so building under a note lifts it and digging drops it. Notes that
@@ -149,6 +162,9 @@ are migrated on load to the corner cell plus a default tile size.
 ## Limits
 
 * The world is bounded to `z = 0…128`; x and y are unbounded.
+* The far end of the view slider is a map view: heights stop being visible
+  (C = 0) in exchange for perfectly readable note writing. Slide back towards
+  the left for the 3D look.
 * A tile is rigid: it rests on the highest block under its footprint, so on very
   uneven ground it bridges dips. Terrain in front still occludes it, and a note
   that ends up mostly hidden fades to a ghost rather than disappearing.

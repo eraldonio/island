@@ -1,14 +1,18 @@
 // Canvas renderer: visible-chunk culling + painter's algorithm.
 //
-// Because the camera angle is fixed, a voxel's depth is exactly x+y+z, so
-// sorting is a single integer per voxel — no z-buffer, no per-pixel depth.
+// The view is a parallel projection, so a voxel's depth is the dot product of
+// its cell with the view ray: sorting is one number per voxel, with no z-buffer
+// and no per-pixel depth. Everything on screen is expressed through the three
+// screen-space images of the world axes (U, V, W), so the same code draws the
+// isometric view and the straight-down one.
 
-import { HW, HH, VZ, Z_MIN, Z_MAX, CHUNK, project, unproject } from './iso.js';
+import { Z_MIN, Z_MAX, CHUNK, project, unproject, ISO } from './iso.js';
 import { PALETTE, PAPER } from './world.js';
 
-const KEY_SHIFT = 1048576;   // 2^20, index field of the packed sort key
+const KEY_SHIFT = 1048576;    // 2^20, the index field of the packed sort key
 const KEY_MASK = KEY_SHIFT - 1;
-const DEPTH_BIAS = 16384;
+const DEPTH_BIAS = 4096;
+const DEPTH_SCALE = 4096;
 
 function shade(hex, f) {
   const n = parseInt(hex.slice(1), 16);
@@ -23,8 +27,8 @@ export class Renderer {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.world = world;
-    this.cam = { ox: 0, oy: 0, scale: 1 };
-    this.hover = null;         // { hit, cells, tint, alpha }
+    this.cam = { ox: 0, oy: 0, scale: 1, tilt: 0, view: ISO };
+    this.hover = null;         // { hit, cells, tile, fill, outline, cursor }
     this.colors = PALETTE.map((p) => ({
       top: p.color,
       right: shade(p.color, 0.79),
@@ -35,6 +39,9 @@ export class Renderer {
     this.buf = { keys: [], kinds: [], notes: [], xs: [], ys: [], zs: [], mats: [], masks: [], ax: [], ay: [] };
     this.resize();
   }
+
+  /** The current view parameters (kept on the camera so it is saved with it). */
+  get v() { return this.cam.view || ISO; }
 
   resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -49,25 +56,37 @@ export class Renderer {
     this.canvas.style.height = h + 'px';
   }
 
+  /** Screen-space images of the world x, y and z axes at the current zoom. */
+  basis() {
+    const v = this.v;
+    const s = this.cam.scale;
+    return {
+      U: { x: v.cos * v.H * s, y: v.sin * v.D * s },
+      V: { x: -v.sin * v.H * s, y: v.cos * v.D * s },
+      W: { x: 0, y: -v.C * s },
+    };
+  }
+
   /** World point -> screen px, including pan and zoom. */
   toScreen(x, y, z) {
-    const p = project(x, y, z);
+    const p = project(x, y, z, this.v);
     return { x: this.cam.ox + p.x * this.cam.scale, y: this.cam.oy + p.y * this.cam.scale };
   }
 
-  /** Screen px (viewport-relative) -> isometric space, for picking. */
+  /** Screen px (viewport-relative) -> view space, for picking. */
   toIso(px, py) {
     return { ix: (px - this.cam.ox) / this.cam.scale, iy: (py - this.cam.oy) / this.cam.scale };
   }
 
   /** Chunk range whose columns can touch the viewport, at any height. */
   visibleChunks() {
+    const v = this.v;
     const { ox, oy, scale } = this.cam;
     const pts = [];
     for (const [sx, sy] of [[0, 0], [this.w, 0], [0, this.h], [this.w, this.h]]) {
       const ix = (sx - ox) / scale;
       const iy = (sy - oy) / scale;
-      pts.push(unproject(ix, iy, Z_MIN), unproject(ix, iy, Z_MAX));
+      pts.push(unproject(ix, iy, Z_MIN, v), unproject(ix, iy, Z_MAX, v));
     }
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const p of pts) {
@@ -98,9 +117,11 @@ export class Renderer {
   /* ── ground grid ───────────────────────────────────────────────────── */
 
   drawGround(ctx, r) {
-    const s = this.cam.scale;
+    const { U, V } = this.basis();
+    // Roughly the spacing between neighbouring grid lines on screen.
+    const cell = Math.min(Math.hypot(U.x, U.y), Math.hypot(V.x, V.y)) * 0.8;
     let step = 1;
-    while (HW * s * step < 10) step *= 2;
+    while (cell * step < 10) step *= 2;
 
     const gx0 = r.cx0 * CHUNK, gy0 = r.cy0 * CHUNK;
     const gx1 = (r.cx1 + 1) * CHUNK, gy1 = (r.cy1 + 1) * CHUNK;
@@ -131,7 +152,7 @@ export class Renderer {
     ctx.stroke();
   }
 
-  /* ── voxels ────────────────────────────────────────────────────────── */
+  /* ── voxels and tiles ──────────────────────────────────────────────── */
 
   gather(r) {
     const g = this.buf;
@@ -140,10 +161,29 @@ export class Renderer {
     g.mats.length = 0; g.masks.length = 0; g.ax.length = 0; g.ay.length = 0;
 
     const world = this.world;
+    const v = this.v;
+    const { U, V, W } = this.basis();
     const { ox, oy, scale } = this.cam;
-    const hw = HW * scale, hh = HH * scale, vz = VZ * scale;
-    const W = this.w, H = this.h;
+    const W_ = this.w;
+    const H_ = this.h;
     let n = 0;
+
+    // Silhouette of a cube relative to its top vertex, used for culling.
+    const off = [
+      [0, 0],
+      [U.x, U.y],
+      [U.x, U.y - W.y],
+      [U.x + V.x, U.y + V.y - W.y],
+      [V.x, V.y - W.y],
+      [V.x, V.y],
+    ];
+    let minX = 0, maxX = 0, minY = 0, maxY = 0;
+    for (const [px, py] of off) {
+      if (px < minX) minX = px;
+      if (px > maxX) maxX = px;
+      if (py < minY) minY = py;
+      if (py > maxY) maxY = py;
+    }
 
     outer:
     for (const chunk of world.chunks.values()) {
@@ -155,22 +195,24 @@ export class Renderer {
         const y = by + ((lk >> 4) & 15);
         const z = lk >>> 8;
 
+        // Faces that cannot be seen are treated as covered, so a stack of
+        // blocks under a straight-down view collapses to its top one.
         const up = world.get(x, y, z + 1) !== undefined;
-        const rt = world.get(x + 1, y, z) !== undefined;
-        const lf = world.get(x, y + 1, z) !== undefined;
-        if (up && rt && lf) continue;   // fully hidden behind its neighbours
+        const rt = !v.faceX || world.get(x + 1, y, z) !== undefined;
+        const lf = !v.faceY || world.get(x, y + 1, z) !== undefined;
+        if (up && rt && lf) continue;
 
-        const ax = (x - y) * HW * scale + ox;
-        const ay = ((x + y) * HH - (z + 1) * VZ) * scale + oy;
-        if (ax + hw < -1 || ax - hw > W + 1) continue;
-        if (ay + 2 * hh + vz < -1 || ay - hh > H + 1) continue;
+        const ax = (x * v.cos - y * v.sin) * v.H * scale + ox;
+        const ay = ((x * v.sin + y * v.cos) * v.D - (z + 1) * v.C) * scale + oy;
+        if (ax + maxX < -1 || ax + minX > W_ + 1) continue;
+        if (ay + maxY < -1 || ay + minY > H_ + 1) continue;
 
         g.xs.push(x); g.ys.push(y); g.zs.push(z);
         g.mats.push(mat);
         g.masks.push((up ? 1 : 0) | (rt ? 2 : 0) | (lf ? 4 : 0));
         g.ax.push(ax); g.ay.push(ay);
         g.kinds.push(0); g.notes.push(0);
-        g.keys.push((x + y + z + DEPTH_BIAS) * KEY_SHIFT + n);
+        g.keys.push(depthKey(x, y, z, v, n));
         if (++n >= KEY_MASK) break outer;
       }
     }
@@ -182,17 +224,20 @@ export class Renderer {
       const note = notes[ni];
       const L = world.surfaceUnder(note.x, note.y, note.w, note.h);
       const a = this.toScreen(note.x, note.y, L);
-      const b = this.toScreen(note.x + note.w, note.y, L);
-      const c = this.toScreen(note.x + note.w, note.y + note.h, L);
-      const d = this.toScreen(note.x, note.y + note.h, L);
-      if (Math.max(a.x, b.x, c.x, d.x) < -2 || Math.min(a.x, b.x, c.x, d.x) > W + 2) continue;
-      if (Math.max(a.y, b.y, c.y, d.y) < -2 || Math.min(a.y, b.y, c.y, d.y) > H + 2) continue;
+      const bx = a.x + U.x * note.w;
+      const by = a.y + U.y * note.w;
+      const cx = bx + V.x * note.h;
+      const cy = by + V.y * note.h;
+      const dx = a.x + V.x * note.h;
+      const dy = a.y + V.y * note.h;
+      if (Math.max(a.x, bx, cx, dx) < -2 || Math.min(a.x, bx, cx, dx) > W_ + 2) continue;
+      if (Math.max(a.y, by, cy, dy) < -2 || Math.min(a.y, by, cy, dy) > H_ + 2) continue;
 
       g.xs.push(note.x); g.ys.push(note.y); g.zs.push(L);
       g.mats.push(0); g.masks.push(0);
       g.kinds.push(1); g.notes.push(ni);
       g.ax.push(a.x); g.ay.push(a.y);
-      g.keys.push((note.x + note.w + note.y + note.h + L + DEPTH_BIAS) * KEY_SHIFT + n);
+      g.keys.push(depthKey(note.x + note.w, note.y + note.h, L, v, n));
       if (++n >= KEY_MASK) break;
     }
     g.keys.sort((a, b) => a - b);
@@ -201,8 +246,7 @@ export class Renderer {
   drawSorted(ctx) {
     const g = this.buf;
     const keys = g.keys;
-    const s = this.cam.scale;
-    const hw = HW * s, hh = HH * s, vz = VZ * s, h2 = 2 * hh;
+    const { U, V, W } = this.basis();
     let style = '';
 
     ctx.lineWidth = 1;
@@ -210,53 +254,53 @@ export class Renderer {
 
     for (let i = 0; i < keys.length; i++) {
       const k = keys[i] & KEY_MASK;
-      if (g.kinds[k] === 1) { this.drawNoteTile(ctx, this.world.notes[g.notes[k]], g.zs[k]); continue; }
+      if (g.kinds[k] === 1) { this.drawNoteTile(ctx, this.world.notes[g.notes[k]], g.zs[k], U, V); continue; }
       const m = g.masks[k];
       const A = g.ax[k];
       const B = g.ay[k];
       const col = this.colors[g.mats[k]];
 
-      if (!(m & 1)) {                             // +z (top)
+      if (!(m & 1)) {                             // top
         if (col.top !== style) { ctx.fillStyle = style = col.top; ctx.strokeStyle = style; }
         ctx.beginPath();
         ctx.moveTo(A, B);
-        ctx.lineTo(A + hw, B + hh);
-        ctx.lineTo(A, B + h2);
-        ctx.lineTo(A - hw, B + hh);
+        ctx.lineTo(A + U.x, B + U.y);
+        ctx.lineTo(A + U.x + V.x, B + U.y + V.y);
+        ctx.lineTo(A + V.x, B + V.y);
         ctx.closePath();
         ctx.fill(); ctx.stroke();
       }
-      if (!(m & 2)) {                             // +x (right)
+      if (!(m & 2)) {                             // +x
         if (col.right !== style) { ctx.fillStyle = style = col.right; ctx.strokeStyle = style; }
         ctx.beginPath();
-        ctx.moveTo(A + hw, B + hh);
-        ctx.lineTo(A, B + h2);
-        ctx.lineTo(A, B + h2 + vz);
-        ctx.lineTo(A + hw, B + hh + vz);
+        ctx.moveTo(A + U.x, B + U.y);
+        ctx.lineTo(A + U.x + V.x, B + U.y + V.y);
+        ctx.lineTo(A + U.x + V.x - W.x, B + U.y + V.y - W.y);
+        ctx.lineTo(A + U.x - W.x, B + U.y - W.y);
         ctx.closePath();
         ctx.fill(); ctx.stroke();
       }
-      if (!(m & 4)) {                             // +y (left)
+      if (!(m & 4)) {                             // +y
         if (col.left !== style) { ctx.fillStyle = style = col.left; ctx.strokeStyle = style; }
         ctx.beginPath();
-        ctx.moveTo(A - hw, B + hh);
-        ctx.lineTo(A, B + h2);
-        ctx.lineTo(A, B + h2 + vz);
-        ctx.lineTo(A - hw, B + hh + vz);
+        ctx.moveTo(A + V.x, B + V.y);
+        ctx.lineTo(A + U.x + V.x, B + U.y + V.y);
+        ctx.lineTo(A + U.x + V.x - W.x, B + U.y + V.y - W.y);
+        ctx.lineTo(A + V.x - W.x, B + V.y - W.y);
         ctx.closePath();
         ctx.fill(); ctx.stroke();
       }
     }
   }
 
-  /* ── hover feedback ────────────────────────────────────────────────── */
+  /* ── notes ─────────────────────────────────────────────────────────── */
 
   /** Paper of a note tile: a solid slab lying on the surface. */
-  drawNoteTile(ctx, note, level) {
+  drawNoteTile(ctx, note, level, U, V) {
     const a = this.toScreen(note.x, note.y, level);
-    const b = this.toScreen(note.x + note.w, note.y, level);
-    const c = this.toScreen(note.x + note.w, note.y + note.h, level);
-    const d = this.toScreen(note.x, note.y + note.h, level);
+    const b = { x: a.x + U.x * note.w, y: a.y + U.y * note.w };
+    const c = { x: b.x + V.x * note.h, y: b.y + V.y * note.h };
+    const d = { x: a.x + V.x * note.h, y: a.y + V.y * note.h };
     const paper = PAPER[((note.color | 0) % PAPER.length + PAPER.length) % PAPER.length];
 
     // Thickness: the same quad pushed toward the viewer, so only the two
@@ -296,24 +340,21 @@ export class Renderer {
     ctx.stroke();
   }
 
+  /* ── hover feedback ────────────────────────────────────────────────── */
+
   drawHover(ctx) {
     const hv = this.hover;
     if (!hv || !hv.hit) return;
-
-    const s = this.cam.scale;
-    const hw = HW * s, hh = HH * s, vz = VZ * s, h2 = 2 * hh;
+    const { U, V, W } = this.basis();
 
     if (hv.tile) {
       const t = hv.tile;
       const a = this.toScreen(t.x, t.y, t.level);
-      const b = this.toScreen(t.x + t.w, t.y, t.level);
-      const c = this.toScreen(t.x + t.w, t.y + t.h, t.level);
-      const d = this.toScreen(t.x, t.y + t.h, t.level);
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
-      ctx.lineTo(c.x, c.y);
-      ctx.lineTo(d.x, d.y);
+      ctx.lineTo(a.x + U.x * t.w, a.y + U.y * t.w);
+      ctx.lineTo(a.x + U.x * t.w + V.x * t.h, a.y + U.y * t.w + V.y * t.h);
+      ctx.lineTo(a.x + V.x * t.h, a.y + V.y * t.h);
       ctx.closePath();
       ctx.fillStyle = hv.fill;
       ctx.fill();
@@ -329,19 +370,19 @@ export class Renderer {
         const p = this.toScreen(c.x, c.y, c.z + 1);
         const A = p.x, B = p.y;
         ctx.moveTo(A, B);
-        ctx.lineTo(A + hw, B + hh);
-        ctx.lineTo(A, B + h2);
-        ctx.lineTo(A - hw, B + hh);
+        ctx.lineTo(A + U.x, B + U.y);
+        ctx.lineTo(A + U.x + V.x, B + U.y + V.y);
+        ctx.lineTo(A + V.x, B + V.y);
         ctx.closePath();
-        ctx.moveTo(A + hw, B + hh);
-        ctx.lineTo(A, B + h2);
-        ctx.lineTo(A, B + h2 + vz);
-        ctx.lineTo(A + hw, B + hh + vz);
+        ctx.moveTo(A + U.x, B + U.y);
+        ctx.lineTo(A + U.x + V.x, B + U.y + V.y);
+        ctx.lineTo(A + U.x + V.x - W.x, B + U.y + V.y - W.y);
+        ctx.lineTo(A + U.x - W.x, B + U.y - W.y);
         ctx.closePath();
-        ctx.moveTo(A - hw, B + hh);
-        ctx.lineTo(A, B + h2);
-        ctx.lineTo(A, B + h2 + vz);
-        ctx.lineTo(A - hw, B + hh + vz);
+        ctx.moveTo(A + V.x, B + V.y);
+        ctx.lineTo(A + U.x + V.x, B + U.y + V.y);
+        ctx.lineTo(A + U.x + V.x - W.x, B + U.y + V.y - W.y);
+        ctx.lineTo(A + V.x - W.x, B + V.y - W.y);
         ctx.closePath();
       }
       ctx.fill();
@@ -356,19 +397,25 @@ export class Renderer {
       ctx.beginPath();
       if (c.flat) {
         ctx.moveTo(A, B);
-        ctx.lineTo(A + hw, B + hh);
-        ctx.lineTo(A, B + h2);
-        ctx.lineTo(A - hw, B + hh);
+        ctx.lineTo(A + U.x, B + U.y);
+        ctx.lineTo(A + U.x + V.x, B + U.y + V.y);
+        ctx.lineTo(A + V.x, B + V.y);
       } else {
         ctx.moveTo(A, B);
-        ctx.lineTo(A + hw, B + hh);
-        ctx.lineTo(A + hw, B + hh + vz);
-        ctx.lineTo(A, B + h2 + vz);
-        ctx.lineTo(A - hw, B + hh + vz);
-        ctx.lineTo(A - hw, B + hh);
+        ctx.lineTo(A + U.x, B + U.y);
+        ctx.lineTo(A + U.x - W.x, B + U.y - W.y);
+        ctx.lineTo(A + U.x + V.x - W.x, B + U.y + V.y - W.y);
+        ctx.lineTo(A + V.x - W.x, B + V.y - W.y);
+        ctx.lineTo(A + V.x, B + V.y);
       }
       ctx.closePath();
       ctx.stroke();
     }
   }
+}
+
+/** Packed painter key: depth along the view ray, then insertion index. */
+function depthKey(x, y, z, v, n) {
+  const depth = x * v.dx + y * v.dy + z * v.dz;
+  return Math.round((depth + DEPTH_BIAS) * DEPTH_SCALE) * KEY_SHIFT + n;
 }

@@ -6,7 +6,7 @@
 // same affine matrix as the projection, which keeps it real contenteditable
 // (caret, selection, Ctrl+B/I/U) while looking like writing on a sticker.
 
-import { project, raycast, NOTE_U, HW, HH } from './iso.js';
+import { project, raycast, NOTE_U, ISO } from './iso.js';
 import { PAPER, NOTE_MIN, NOTE_MAX } from './world.js';
 
 const ALLOWED = new Set([
@@ -90,6 +90,7 @@ export class Notes {
     this.hooks = hooks;
     this.els = new Map();
     this.rev = -1;
+    this.revK = -1;
     this.solid = (x, y, z) => world.get(x, y, z) !== undefined;
   }
 
@@ -98,15 +99,23 @@ export class Notes {
 
   /* ── ground-plane maths ────────────────────────────────────────────── */
 
-  /** Affine matrix [a,b,c,d] mapping tile-local px to screen px at zoom 1. */
+  /** The current view, straight off the camera so it can never go stale. */
+  get view() { return this.hooks.cam().view || ISO; }
+
+  /**
+   * Affine matrix [a,b,c,d] mapping tile-local px to screen px. Its columns are
+   * the screen-space images of the world x and y axes, so the ink lands in the
+   * ground plane at any view angle: at k = 1 the writing reads head-on.
+   */
   matrix(cam) {
+    const v = cam.view || ISO;
     const k = cam.scale / NOTE_U;
-    return [HW * k, HH * k, -HW * k, HH * k];
+    return [v.cos * v.H * k, v.sin * v.D * k, -v.sin * v.H * k, v.cos * v.D * k];
   }
 
   originOf(note, cam) {
     const level = this.world.surfaceUnder(note.x, note.y, note.w, note.h);
-    const p = project(note.x, note.y, level);
+    const p = project(note.x, note.y, level, cam.view || ISO);
     const r = this.layer.getBoundingClientRect();
     return { x: r.left + cam.ox + p.x * cam.scale, y: r.top + cam.oy + p.y * cam.scale };
   }
@@ -135,15 +144,19 @@ export class Notes {
 
   /** Fraction of the tile hidden behind blocks that sit in front of it. */
   occlusion(note) {
+    const v = this.view;
     const L = this.world.surfaceUnder(note.x, note.y, note.w, note.h);
     let hidden = 0;
     for (const [fx, fy] of SAMPLES) {
       const px = note.x + fx * note.w;
       const py = note.y + fy * note.h;
-      const s = project(px, py, L);
-      const hit = raycast(s.x, s.y, this.solid);
+      const s = project(px, py, L, v);
+      const hit = raycast(s.x, s.y, this.solid, v);
       if (hit.ground) continue;   // no block anywhere along this ray, so nothing hides the tile
-      if (hit.x + hit.y + hit.z > px + py + L - 1) hidden++;
+      // In front means further along the view ray than the block it rests on.
+      const hitDepth = hit.x * v.dx + hit.y * v.dy + hit.z * v.dz;
+      const tileDepth = px * v.dx + py * v.dy + (L - 1) * v.dz;
+      if (hitDepth > tileDepth) hidden++;
     }
     return hidden / SAMPLES.length;
   }
@@ -188,8 +201,10 @@ export class Notes {
   /* ── frame sync ────────────────────────────────────────────────────── */
 
   sync(cam) {
-    if (this.world.rev !== this.rev) {
+    const k = (cam.view || ISO).k;
+    if (this.world.rev !== this.rev || k !== this.revK) {
       this.rev = this.world.rev;
+      this.revK = k;
       for (const note of this.world.notes) this.regen(note);
     }
 

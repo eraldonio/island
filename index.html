@@ -54,6 +54,10 @@
   <button class="abtn" id="a-zout" title="Zoom out (−)">−</button>
   <button class="abtn" id="a-zin" title="Zoom in (+)">+</button>
   <button class="abtn" id="a-view" title="Centre view (0)">◎</button>
+  <label class="viewctl" title="View angle — drag right to face the notes (V)">
+    <input id="a-tilt" type="range" min="0" max="100" value="0" step="1" aria-label="View angle" />
+    <span id="a-tilt-val" class="mono">0%</span>
+  </label>
   <span class="sep"></span>
   <button class="abtn" id="a-export" title="Export world as JSON">⤓</button>
   <button class="abtn" id="a-import" title="Import world JSON">⤒</button>
@@ -116,9 +120,10 @@
         <h3>Move around</h3>
         <ul>
           <li><b>Space+drag</b>, <b>middle-drag</b> or <b>right-drag</b> — pan the infinite world</li>
-          <li><b>Wheel</b> — pan · <b>Ctrl+wheel</b> — zoom · pinch on touch</li>
+          <li><b>Wheel</b> — zoom at the cursor · <b>Shift+wheel</b> — pan · pinch on touch</li>
           <li><b>+</b> / <b>−</b> / <b>0</b> — zoom in / out / recentre</li>
-          <li>Camera angle is fixed: the world only pans and zooms.</li>
+          <li><b>V</b>, or the <b>view slider</b> — turn the world to face you, so note
+              writing reads head-on instead of at an angle</li>
         </ul>
       </div>
       <div>

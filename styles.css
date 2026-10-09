@@ -80,6 +80,11 @@ body {
 .actions .sep { width: 1px; height: 20px; background: var(--border); margin: 0 3px; }
 .abtn { width: 30px; height: 30px; font-size: 15px; color: var(--fg); }
 
+/* view angle: isometric on the left, straight down (facing the notes) on the right */
+.viewctl { display: flex; align-items: center; gap: 6px; padding: 0 2px; }
+.viewctl input[type="range"] { width: 86px; height: 18px; accent-color: var(--accent); cursor: pointer; }
+.viewctl #a-tilt-val { color: var(--muted); font-size: 11px; min-width: 40px; text-align: right; }
+
 /* ── sticky notes ────────────────────────────────────────────────────── */
 /* A note is a w*h block tile lying on the surface. Its paper quad is drawn by
    the renderer inside the voxel painter order; the DOM holds only the ink,

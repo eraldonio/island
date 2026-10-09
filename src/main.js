@@ -3,7 +3,7 @@
 import { World, PALETTE, PAPER, seedStarter, uid, NOTE_NEW } from './world.js';
 import { Renderer } from './render.js';
 import { Notes, sanitizeHtml } from './notes.js';
-import { raycast } from './iso.js';
+import { raycast, viewOf, ISO } from './iso.js';
 import { targetsFor, BRUSHES } from './tools.js';
 import * as store from './store.js';
 
@@ -74,7 +74,7 @@ const solid = (x, y, z) => world.get(x, y, z) !== undefined;
 function pickAt(clientX, clientY) {
   const r = canvas.getBoundingClientRect();
   const iso = renderer.toIso(clientX - r.left, clientY - r.top);
-  return raycast(iso.ix, iso.iy, solid);
+  return raycast(iso.ix, iso.iy, solid, cam.view || ISO);
 }
 
 function hexA(hex, a) {
@@ -338,17 +338,20 @@ canvas.addEventListener('pointerup', onUp);
 canvas.addEventListener('pointercancel', onUp);
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-// Bound to the window so the wheel keeps panning/zooming even when the cursor
-// is over a note tile; modals keep their own scrolling.
+// Bound to the window so the wheel works even when the cursor is over a note
+// tile; modals keep their own scrolling. Wheel zooms at the cursor, shift pans,
+// and ctrl+wheel keeps working because trackpad pinch sends it.
 window.addEventListener('wheel', (e) => {
   if (e.target.closest && e.target.closest('.backdrop')) return;
   e.preventDefault();
   const r = canvas.getBoundingClientRect();
-  if (e.ctrlKey || e.metaKey || e.altKey) {
-    zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * 0.0022));
-  } else {
+  if (e.shiftKey) {
     cam.ox -= e.deltaX;
     cam.oy -= e.deltaY;
+    notes.rehover();
+  } else {
+    const step = e.deltaMode === 1 ? 0.06 : 0.0018;   // line-scroll vs pixel-scroll
+    zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * step));
   }
   invalidate();
 }, { passive: false });
@@ -463,6 +466,34 @@ function updateStatus() {
 
 /* ── actions ─────────────────────────────────────────────────────────── */
 
+/**
+ * Rotate the view: 0 is the isometric default, 1 looks straight down with the
+ * world axes square on screen — the pose where note text reads head-on.
+ */
+function setView(k) {
+  cam.tilt = Math.max(0, Math.min(1, Number(k) || 0));
+  cam.view = viewOf(cam.tilt);
+  const input = $('a-tilt');
+  if (input && document.activeElement !== input) input.value = String(Math.round(cam.tilt * 100));
+  const out = $('a-tilt-val');
+  if (out) out.textContent = cam.tilt >= 0.999 ? 'facing' : `${Math.round(cam.tilt * 100)}%`;
+  invalidate();
+}
+
+function toggleView() {
+  setView(cam.tilt > 0.5 ? 0 : 1);
+}
+
+/** Restore a saved camera, including its view angle. */
+function applyCamera(c) {
+  if (!c || !Number.isFinite(c.scale)) return false;
+  cam.ox = c.ox;
+  cam.oy = c.oy;
+  cam.scale = c.scale;
+  setView(Number.isFinite(c.tilt) ? c.tilt : 0);
+  return true;
+}
+
 function fitView() {
   cam.scale = 1;
   cam.ox = window.innerWidth / 2;
@@ -486,6 +517,11 @@ function buildActions() {
   $('a-zin').addEventListener('click', () => zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, 1.2));
   $('a-zout').addEventListener('click', () => zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, 1 / 1.2));
   $('a-view').addEventListener('click', fitView);
+
+  const tilt = $('a-tilt');
+  tilt.addEventListener('input', () => setView(Number(tilt.value) / 100));
+  tilt.addEventListener('change', () => requestSave());
+  setView(cam.tilt);
   $('a-help').addEventListener('click', () => { $('help').hidden = false; });
   $('help-done').addEventListener('click', () => { $('help').hidden = true; });
 
@@ -501,8 +537,7 @@ function buildActions() {
       const data = await store.readFile(f);
       if (!confirm(`Replace the current world with "${f.name}" (${data.voxels.length} blocks, ${(data.notes || []).length} notes)?`)) return;
       world.load(data);
-      if (data.camera && Number.isFinite(data.camera.scale)) Object.assign(cam, data.camera);
-      else fitView();
+      if (!applyCamera(data.camera)) fitView();
       invalidate();
       requestSave();
     } catch (err) {
@@ -586,6 +621,7 @@ window.addEventListener('keydown', (e) => {
     case 'p': case 'P': setTool('paint'); return;
     case 'n': case 'N': setTool('note'); return;
     case 'h': case 'H': setTool('pan'); return;
+    case 'v': case 'V': toggleView(); return;
     case '[': setBrush(BRUSHES[Math.max(0, BRUSHES.indexOf(state.brush) - 1)]); return;
     case ']': setBrush(BRUSHES[Math.min(BRUSHES.length - 1, BRUSHES.indexOf(state.brush) + 1)]); return;
     case '+': case '=': zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, 1.2); return;
@@ -628,8 +664,7 @@ buildActions();
 const saved = store.load();
 if (saved) {
   world.load(saved);
-  if (saved.camera && Number.isFinite(saved.camera.scale)) Object.assign(cam, saved.camera);
-  else fitView();
+  if (!applyCamera(saved.camera)) fitView();
 } else {
   seedStarter(world);
   fitView();

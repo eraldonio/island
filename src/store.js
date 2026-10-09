@@ -7,7 +7,7 @@ const KEY = 'island.world.v1';
 export function save(world, cam) {
   try {
     const data = world.serialize();
-    data.camera = { ox: cam.ox, oy: cam.oy, scale: cam.scale };
+    data.camera = { ox: cam.ox, oy: cam.oy, scale: cam.scale, tilt: cam.tilt || 0 };
     localStorage.setItem(KEY, JSON.stringify(data));
     return true;
   } catch (err) {
@@ -36,7 +36,7 @@ export function clear() {
 
 export function download(world, cam) {
   const data = world.serialize();
-  data.camera = { ox: cam.ox, oy: cam.oy, scale: cam.scale };
+  data.camera = { ox: cam.ox, oy: cam.oy, scale: cam.scale, tilt: cam.tilt || 0 };
   const blob = new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
