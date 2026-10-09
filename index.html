@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Island — voxel notes</title>
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+
+<canvas id="stage"></canvas>
+<div id="notes-layer" class="notes-layer"></div>
+
+<!-- ── toolbar ─────────────────────────────────────────────────────────── -->
+<div id="toolbar" class="panel" role="toolbar" aria-label="Tools">
+  <div class="tools" id="tools">
+    <button class="tbtn" data-tool="build" title="Build — click/drag to place blocks (B)">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.6 17 6.6v7.8L10 18.4 3 14.4V6.6z"/><path d="M3 6.6 10 10.5l7-3.9M10 10.5v7.9"/></svg>
+    </button>
+    <button class="tbtn" data-tool="dig" title="Dig — click/drag to remove blocks (D)">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.6 17 6.6v7.8L10 18.4 3 14.4V6.6z"/><path d="M3 6.6 10 10.5l7-3.9M10 10.5v7.9"/><path d="M6.6 13.4 13.4 6.6"/></svg>
+    </button>
+    <button class="tbtn" data-tool="paint" title="Paint — recolour the top blocks (P)">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.8s5.2 5.6 5.2 9.1a5.2 5.2 0 0 1-10.4 0C4.8 8.4 10 2.8 10 2.8z"/></svg>
+    </button>
+    <button class="tbtn" data-tool="note" title="Note — click to drop a sticky note (N)">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3.5h8.6l3.4 3.4v9.6H4z"/><path d="M12.6 3.5v3.4H16"/><path d="M6.6 10.4h6M6.6 13h4"/></svg>
+    </button>
+    <button class="tbtn" data-tool="pan" title="Pan — drag to move the world (H, or hold Space)">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5v15M2.5 10h15"/><path d="M10 2.5 7.6 5.2M10 2.5l2.4 2.7M10 17.5l-2.4-2.7M10 17.5l2.4-2.7M2.5 10l2.7-2.4M2.5 10l2.7 2.4M17.5 10l-2.7-2.4M17.5 10l-2.7 2.4"/></svg>
+    </button>
+  </div>
+  <div class="divider"></div>
+  <div class="swatches" id="swatches" aria-label="Materials"></div>
+  <div class="divider"></div>
+  <div class="brushes" id="brushes" aria-label="Brush size"></div>
+</div>
+
+<!-- ── status ──────────────────────────────────────────────────────────── -->
+<div id="status" class="panel status" aria-live="polite">
+  <span id="st-tool">Build</span>
+  <span class="dot">·</span><span id="st-mat">Grass</span>
+  <span class="dot">·</span><span id="st-brush">1×1</span>
+  <span class="sep"></span><span id="st-pos" class="mono">0, 0 · h 0</span>
+  <span class="sep"></span><span id="st-count" class="mono">0 blocks · 0 notes</span>
+  <span class="sep"></span><span id="st-zoom" class="mono">100%</span>
+</div>
+
+<!-- ── actions ─────────────────────────────────────────────────────────── -->
+<div id="actions" class="panel actions">
+  <button class="abtn" id="a-undo" title="Undo (Ctrl+Z)">↶</button>
+  <button class="abtn" id="a-redo" title="Redo (Ctrl+Shift+Z)">↷</button>
+  <span class="sep"></span>
+  <button class="abtn" id="a-zout" title="Zoom out (−)">−</button>
+  <button class="abtn" id="a-zin" title="Zoom in (+)">+</button>
+  <button class="abtn" id="a-view" title="Centre view (0)">◎</button>
+  <span class="sep"></span>
+  <button class="abtn" id="a-export" title="Export world as JSON">⤓</button>
+  <button class="abtn" id="a-import" title="Import world JSON">⤒</button>
+  <button class="abtn" id="a-reset" title="Erase everything and start over">✕</button>
+  <button class="abtn" id="a-help" title="Help (?)">?</button>
+</div>
+
+<!-- ── note editor (WYSIWYG) ───────────────────────────────────────────── -->
+<div id="editor" class="backdrop" hidden>
+  <div class="editor" role="dialog" aria-modal="true" aria-label="Note editor">
+    <div class="erow etop">
+      <button class="fbtn" data-cmd="bold" title="Bold"><b>B</b></button>
+      <button class="fbtn" data-cmd="italic" title="Italic"><i>I</i></button>
+      <button class="fbtn" data-cmd="underline" title="Underline"><u>U</u></button>
+      <button class="fbtn" data-cmd="strikeThrough" title="Strikethrough"><s>S</s></button>
+      <span class="sep"></span>
+      <button class="fbtn" data-cmd="formatBlock" data-val="h3" title="Heading">H</button>
+      <button class="fbtn" data-cmd="formatBlock" data-val="p" title="Body text">¶</button>
+      <span class="sep"></span>
+      <button class="fbtn" data-cmd="insertUnorderedList" title="Bulleted list">•</button>
+      <button class="fbtn" data-cmd="insertOrderedList" title="Numbered list">1.</button>
+      <button class="fbtn" data-cmd="formatBlock" data-val="blockquote" title="Quote">❝</button>
+      <button class="fbtn" data-cmd="formatBlock" data-val="pre" title="Code block">≡</button>
+      <span class="sep"></span>
+      <button class="fbtn" data-cmd="foreColor" data-val="#b43b2f" title="Red text" style="color:#b43b2f">A</button>
+      <button class="fbtn" data-cmd="foreColor" data-val="#1a5fb4" title="Blue text" style="color:#1a5fb4">A</button>
+      <button class="fbtn" data-cmd="foreColor" data-val="#2f7d32" title="Green text" style="color:#2f7d32">A</button>
+      <button class="fbtn" data-cmd="hiliteColor" data-val="#fff59d" title="Highlight">▮</button>
+      <span class="sep"></span>
+      <button class="fbtn" data-cmd="removeFormat" title="Clear formatting"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.6 16.4h12.8"/><path d="M7.2 12.6 12 5.2l3.4 2.2-3.6 5.2H7.6z"/></svg></button>
+    </div>
+    <div class="ebody" id="editor-body" contenteditable="true" spellcheck="true"></div>
+    <div class="erow ebottom">
+      <span class="muted">Paper</span>
+      <span id="editor-papers" class="papers"></span>
+      <span class="grow"></span>
+      <span class="hint muted">Ctrl+Enter closes</span>
+      <button class="btn danger" id="editor-delete">Delete note</button>
+      <button class="btn primary" id="editor-done">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── help ────────────────────────────────────────────────────────────── -->
+<div id="help" class="backdrop" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Help">
+    <h2>Island — a voxel world you can write on</h2>
+    <div class="cols">
+      <div>
+        <h3>Sculpt</h3>
+        <ul>
+          <li><b>Click / drag</b> — apply the current tool to the block under the cursor</li>
+          <li><b>B</b> build · <b>D</b> dig · <b>P</b> paint · <b>N</b> note · <b>H</b> pan</li>
+          <li><b>1…8</b> — pick a material</li>
+          <li><b>[</b> / <b>]</b> — brush size (1×1, 3×3, 5×5)</li>
+          <li><b>Ctrl+Z</b> / <b>Ctrl+Shift+Z</b> — undo / redo (one stroke at a time)</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Move around</h3>
+        <ul>
+          <li><b>Space+drag</b>, <b>middle-drag</b> or <b>right-drag</b> — pan the infinite world</li>
+          <li><b>Wheel</b> — pan · <b>Ctrl+wheel</b> — zoom · pinch on touch</li>
+          <li><b>+</b> / <b>−</b> / <b>0</b> — zoom in / out / recentre</li>
+          <li>Camera angle is fixed: the world only pans and zooms.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Notes</h3>
+        <ul>
+          <li><b>Note tool</b> or <b>Shift+click</b> — drop a sticky note on any block</li>
+          <li><b>Click the note text</b> — edit it in place, WYSIWYG</li>
+          <li><b>Double-click</b> the note, or <b>⤢</b> — open the big editor with formatting</li>
+          <li><b>Drag the note's top bar</b> — move it to another block</li>
+          <li><b>●</b> cycles paper colour · <b>×</b> deletes (undo brings it back)</li>
+        </ul>
+      </div>
+    </div>
+    <p class="muted footer">Everything is stored in this browser and saved as you work. Use ⤓ to export a JSON copy.</p>
+    <div class="erow end"><button class="btn primary" id="help-done">Got it</button></div>
+  </div>
+</div>
+
+<input id="import-file" type="file" accept="application/json,.json" hidden />
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
