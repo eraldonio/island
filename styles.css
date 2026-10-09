@@ -42,7 +42,7 @@ body {
   backdrop-filter: blur(12px);
 }
 #toolbar { left: 14px; top: 14px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
-.tools { display: flex; flex-direction: column; gap: 4px; }
+#toolbar .tools { display: flex; flex-direction: column; gap: 4px; }
 .divider { height: 1px; background: var(--border); margin: 2px 0; }
 
 .tbtn, .abtn, .fbtn {
@@ -81,65 +81,74 @@ body {
 .abtn { width: 30px; height: 30px; font-size: 15px; color: var(--fg); }
 
 /* ── sticky notes ────────────────────────────────────────────────────── */
+/* A note is a w*h block tile lying on the surface. Its paper quad is drawn by
+   the renderer inside the voxel painter order; the DOM holds only the ink,
+   mapped into the ground plane with the same matrix as the projection. */
 .note {
   position: absolute; left: 0; top: 0;
   transform-origin: 0 0;
+  pointer-events: none;
+}
+.note.buried { opacity: 0.12; }
+.note .sheet {
+  position: absolute; left: 0; top: 0;
+  transform-origin: 0 0;
   pointer-events: auto;
-  will-change: transform;
+  cursor: text;
 }
-.note .stem { position: absolute; left: -1px; bottom: 0; width: 2px; height: 15px; background: rgba(0, 0, 0, 0.3); }
-.note .stem::after {
-  content: ""; position: absolute; left: -2px; bottom: -3px;
-  width: 6px; height: 6px; border-radius: 50%;
-  background: rgba(0, 0, 0, 0.42); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
-}
-.note .card {
-  position: absolute; left: 0; bottom: 0; width: 218px;
-  transform: translate(-50%, -17px);
-  display: flex; flex-direction: column;
-  background: var(--paper, #ffe08a); color: #23282e;
-  border-radius: 4px 4px 6px 6px;
-  border: 1px solid rgba(0, 0, 0, 0.14);
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.55);
+.note .sheet:focus-within { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 65%, transparent); }
+.note .ink {
+  position: absolute; inset: 0;
+  padding: 4px 5px;
+  font-size: 12.5px; line-height: 1.25;
+  color: #23282e;
   overflow: hidden;
+  outline: none; user-select: text;
+  overflow-wrap: break-word; hyphens: none;
 }
-.note .bar {
+/* Handles sit on the tile corners, so half of each is outside the quad; the
+   .hot proximity class (set from the pointer position) decides what is live. */
+.note .hz {
+  position: absolute; width: 17px; height: 17px; margin: -8.5px 0 0 -8.5px;
+  border-radius: 3px; background: #fff; border: 1.5px solid rgba(0, 0, 0, 0.5);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  opacity: 0; pointer-events: none; cursor: nwse-resize;
+  transition: opacity 0.12s;
+}
+.note.hot .hz, .note.resizing .hz { opacity: 0.95; pointer-events: auto; }
+.note .tools {
+  position: absolute; left: 0; top: 0;
+  transform: translate(-50%, -100%) translateY(-8px);
   display: flex; align-items: center; gap: 2px;
-  height: 21px; padding: 0 4px;
-  background: rgba(0, 0, 0, 0.055);
-  border-bottom: 1px solid rgba(0, 0, 0, 0.07);
-  cursor: grab;
+  width: max-content;
+  padding: 2px 4px; border-radius: 9px; white-space: nowrap;
+  background: var(--panel); border: 1px solid var(--border);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  opacity: 0; pointer-events: none; transition: opacity 0.12s;
 }
-.note.dragging .bar { cursor: grabbing; }
-.note .bar .grip {
-  flex: 1; height: 9px; opacity: 0.4;
-  background-image: radial-gradient(circle, currentColor 1px, transparent 1.1px);
-  background-size: 5px 5px; background-position: 1px 50%;
+.note.hot .tools, .note:focus-within .tools,
+.note.dragging .tools, .note.resizing .tools { opacity: 1; pointer-events: auto; }
+.note .tools .size { font: 11px/1 ui-monospace, monospace; color: var(--muted); padding: 0 3px; }
+.note.tight .tools .size { color: #e5b45c; }
+.note.tight .tools .size::after { content: " …"; }
+.note .tools button {
+  width: 21px; height: 19px; display: grid; place-items: center;
+  background: transparent; border: 0; border-radius: 5px;
+  color: var(--fg); opacity: 0.65; cursor: pointer; font: inherit; font-size: 11px; line-height: 1;
 }
-.note .bar button {
-  width: 19px; height: 17px; display: grid; place-items: center;
-  background: transparent; border: 0; border-radius: 4px;
-  color: inherit; opacity: 0.4; cursor: pointer; font: inherit; font-size: 11px; line-height: 1;
-}
-.note .bar button:hover { opacity: 1; background: rgba(0, 0, 0, 0.09); }
-.note .bar .paper-dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; opacity: 0.5; }
-.note .body {
-  padding: 7px 10px 10px; font-size: 13px; line-height: 1.42;
-  min-height: 22px; max-height: 340px; overflow: auto;
-  outline: none; cursor: text; user-select: text; cursor: text;
-  overflow-wrap: break-word;
-}
-.note .body:focus { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent); }
-.note .body p { margin: 0 0 0.45em; }
-.note .body > :last-child { margin-bottom: 0; }
-.note .body h1, .note .body h2, .note .body h3 { margin: 0.1em 0 0.3em; font-size: 14.5px; line-height: 1.25; }
-.note .body ul, .note .body ol { margin: 0.25em 0; padding-left: 19px; }
-.note .body blockquote { margin: 0.3em 0; padding-left: 8px; border-left: 3px solid rgba(0, 0, 0, 0.22); }
-.note .body pre { margin: 0.3em 0; padding: 6px 8px; background: rgba(0, 0, 0, 0.07); border-radius: 5px; font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; }
-.note .body code { background: rgba(0, 0, 0, 0.08); padding: 0 3px; border-radius: 3px; font-family: ui-monospace, monospace; font-size: 0.94em; }
-.note .body a { color: #1a5fb4; }
-.note.fresh .card { animation: pop 0.16s ease-out; }
-@keyframes pop { from { transform: translate(-50%, -17px) scale(0.86); opacity: 0.4; } }
+.note .tools button:hover { opacity: 1; background: var(--hover); }
+.note .tools .n-grip { cursor: grab; font-size: 13px; }
+.note.dragging .tools .n-grip { cursor: grabbing; }
+.note .ink p { margin: 0 0 0.35em; }
+.note .ink > :last-child { margin-bottom: 0; }
+.note .ink h1, .note .ink h2, .note .ink h3 { margin: 0.05em 0 0.25em; font-size: 14px; line-height: 1.2; }
+.note .ink ul, .note .ink ol { margin: 0.2em 0; padding-left: 17px; }
+.note .ink blockquote { margin: 0.25em 0; padding-left: 7px; border-left: 3px solid rgba(0, 0, 0, 0.22); }
+.note .ink pre { margin: 0.25em 0; padding: 5px 7px; background: rgba(0, 0, 0, 0.07); border-radius: 5px; font: 11.5px/1.35 ui-monospace, monospace; white-space: pre-wrap; }
+.note .ink code { background: rgba(0, 0, 0, 0.08); padding: 0 3px; border-radius: 3px; font-family: ui-monospace, monospace; font-size: 0.94em; }
+.note .ink a { color: #1a5fb4; }
+.note.fresh { animation: fadein 0.18s ease-out; }
+@keyframes fadein { from { opacity: 0; } }
 
 /* ── modals ──────────────────────────────────────────────────────────── */
 .backdrop {

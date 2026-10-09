@@ -78,8 +78,3 @@ export function targetsFor(world, hit, tool, size) {
 
   return out;
 }
-
-/** Surface height a note pinned to this hit should float at. */
-export function anchorZ(hit) {
-  return hit.ground ? Z_MIN : hit.z + 1;
-}

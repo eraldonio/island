@@ -14,6 +14,7 @@ export const VZ = TILE / 2;   // screen height of one z level (16)
 export const Z_MIN = 0;
 export const Z_MAX = 128;
 export const CHUNK = 16;      // columns per chunk, on x and y
+export const NOTE_U = 18;     // local px per block for a note lying on the ground
 
 /** World point -> isometric screen point (before camera pan/zoom). */
 export function project(x, y, z) {

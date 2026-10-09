@@ -21,7 +21,7 @@ export function load() {
     const raw = localStorage.getItem(KEY);
     if (!raw) return null;
     const data = JSON.parse(raw);
-    if (!data || data.version !== 1 || !Array.isArray(data.voxels)) return null;
+    if (!data || (data.version !== 1 && data.version !== 2) || !Array.isArray(data.voxels)) return null;
     for (const n of data.notes || []) n.html = sanitizeHtml(n.html || '');
     return data;
   } catch (err) {

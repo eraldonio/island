@@ -29,6 +29,7 @@ export class World {
     this.redoStack = [];
     this.stroke = null;
     this.count = 0;
+    this.rev = 0;              // bumped on any voxel change (geometry caches)
   }
 
   /* ── voxels ────────────────────────────────────────────────────────── */
@@ -64,6 +65,7 @@ export class World {
         if (t < 0) this.tops.delete(tkey(x, y)); else this.tops.set(tkey(x, y), t);
       }
       this.count--;
+      this.rev++;
       return true;
     }
 
@@ -78,7 +80,24 @@ export class World {
     const tk = tkey(x, y);
     const cur = this.tops.get(tk);
     if (cur === undefined || z > cur) this.tops.set(tk, z);
+    this.rev++;
     return true;
+  }
+
+  /**
+   * Height of the surface under a w*h block footprint: one above the highest
+   * block beneath it, so a rigid note tile rests on the tallest point.
+   * Bare ground reads as 0.
+   */
+  surfaceUnder(x, y, w, h) {
+    let top = -1;
+    for (let i = 0; i < w; i++) {
+      for (let j = 0; j < h; j++) {
+        const t = this.topAt(x + i, y + j);
+        if (t > top) top = t;
+      }
+    }
+    return top + 1;
   }
 
   /** Apply a batch of {x,y,z,mat} edits, recording them for undo. */
@@ -115,6 +134,7 @@ export class World {
     this.undoStack.push(cmd);
     if (this.undoStack.length > 400) this.undoStack.shift();
     this.redoStack.length = 0;
+    this.rev++;              // note geometry can depend on any change
   }
 
   canUndo() { return this.undoStack.length > 0; }
@@ -125,6 +145,7 @@ export class World {
     if (!cmd) return false;
     this._run(cmd, 'undo');
     this.redoStack.push(cmd);
+    this.rev++;
     return true;
   }
 
@@ -133,6 +154,7 @@ export class World {
     if (!cmd) return false;
     this._run(cmd, 'redo');
     this.undoStack.push(cmd);
+    this.rev++;
     return true;
   }
 
@@ -202,9 +224,9 @@ export class World {
       }
     }
     return {
-      version: 1,
+      version: 2,
       voxels,
-      notes: this.notes.map((n) => ({ id: n.id, x: n.x, y: n.y, z: n.z, color: n.color, html: n.html })),
+      notes: this.notes.map((n) => ({ id: n.id, x: n.x, y: n.y, w: n.w, h: n.h, color: n.color, html: n.html })),
     };
   }
 
@@ -217,17 +239,37 @@ export class World {
     this.stroke = null;
     this.count = 0;
     for (const [x, y, z, mat] of data.voxels || []) this.set(x, y, z, mat);
-    for (const n of data.notes || []) {
-      this.notes.push({
-        id: n.id || uid(),
-        x: n.x,
-        y: n.y,
-        z: n.z,
-        color: n.color | 0,
-        html: n.html || '',
-      });
-    }
+    for (const n of data.notes || []) this.notes.push(normalizeNote(n));
+    this.rev++;
   }
+}
+
+export const NOTE_MIN = 1;
+export const NOTE_MAX = 16;
+export const NOTE_NEW = { w: 6, h: 4 };
+
+const blocks = (v, fallback) => {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(NOTE_MAX, Math.max(NOTE_MIN, n));
+};
+
+/**
+ * Notes are a w*h block tile lying on the surface. Stored revisions before v2
+ * kept a floating pin (fractional centre x/y plus an explicit z), so those are
+ * converted to the corner cell and given a tile size.
+ */
+export function normalizeNote(raw) {
+  const legacy = raw.w === undefined || raw.h === undefined;
+  return {
+    id: raw.id || uid(),
+    x: legacy ? Math.round((Number(raw.x) || 0) - 0.5) : Math.round(Number(raw.x) || 0),
+    y: legacy ? Math.round((Number(raw.y) || 0) - 0.5) : Math.round(Number(raw.y) || 0),
+    w: legacy ? 6 : blocks(raw.w, NOTE_NEW.w),
+    h: legacy ? 4 : blocks(raw.h, NOTE_NEW.h),
+    color: Number(raw.color) | 0,
+    html: raw.html || '',
+  };
 }
 
 let seq = 0;
@@ -267,12 +309,10 @@ export function seedStarter(world) {
 
   world.notes.push({
     id: uid(),
-    x: 0.5, y: 0.5, z: 3,
+    x: 6, y: -2, w: 10, h: 5,
     color: 0,
     html:
-      '<h3>Hello 👋</h3>' +
-      '<p>This is your island. <b>Drag</b> the world to pan forever, ' +
-      '<b>B</b> to build, <b>D</b> to dig.</p>' +
-      '<p>Hold <code>Shift</code> and click anywhere to drop a note.</p>',
+      '<p><b>Welcome.</b> Shift+click to stick a note on any block.</p>' +
+      '<p>B build · D dig · P paint · drag a corner to resize.</p>',
   });
 }

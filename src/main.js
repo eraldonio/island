@@ -1,10 +1,10 @@
 // Wiring: camera, input, tools, editor modal, status, autosave.
 
-import { World, PALETTE, PAPER, seedStarter } from './world.js';
+import { World, PALETTE, PAPER, seedStarter, uid, NOTE_NEW } from './world.js';
 import { Renderer } from './render.js';
 import { Notes, sanitizeHtml } from './notes.js';
 import { raycast } from './iso.js';
-import { targetsFor, anchorZ, BRUSHES } from './tools.js';
+import { targetsFor, BRUSHES } from './tools.js';
 import * as store from './store.js';
 
 const $ = (id) => document.getElementById(id);
@@ -16,22 +16,33 @@ const cam = renderer.cam;
 const state = { tool: 'build', mat: 0, brush: 1, space: false };
 
 let hover = null;        // voxel pick under the cursor (or null)
-let noteGhost = null;    // voxel pick a dragged note would land on
 let frameHandle = 0;
 let saveTimer = 0;
 let editing = null;      // { id, before } while the modal editor is open
 
 /* ── notes layer ─────────────────────────────────────────────────────── */
 
+/** Restores the pre-drag values so patchNote can record a single undo step. */
+function commitNote(id, before, after) {
+  const n = world.note(id);
+  if (!n) return;
+  let changed = false;
+  for (const k of Object.keys(after)) if (before[k] !== after[k]) changed = true;
+  if (!changed) { invalidate(); return; }
+  Object.assign(n, before);
+  world.patchNote(id, after);
+  invalidate();
+  requestSave();
+}
+
 const notes = new Notes($('notes-layer'), world, {
   cam: () => cam,
   pickAt: (cx, cy) => pickAt(cx, cy),
-  onGhost: (hit) => { noteGhost = hit; invalidate(); },
-  onDrop: (id, hit) => {
-    if (hit) world.patchNote(id, { x: hit.x + 0.5, y: hit.y + 0.5, z: anchorZ(hit) });
-    invalidate();
-    requestSave();
-  },
+  onGhost: () => invalidate(),
+  onDragStart: () => { hover = null; },
+  onDrop: (id, before, after) => commitNote(id, before, after),
+  onResize: () => invalidate(),
+  onResizeEnd: (id, before, after) => commitNote(id, before, after),
   onCycleColor: (id) => {
     const n = world.note(id);
     if (!n) return;
@@ -40,7 +51,7 @@ const notes = new Notes($('notes-layer'), world, {
   },
   onExpand: (id) => openEditor(id),
   onDelete: (id) => { world.removeNote(id); invalidate(); requestSave(); },
-  onFocusNote: () => { hover = null; noteGhost = null; },
+  onFocusNote: () => { hover = null; },
   onTextEdit: (id, before, after) => {
     const clean = sanitizeHtml(after);
     if (clean === before) return;
@@ -50,6 +61,13 @@ const notes = new Notes($('notes-layer'), world, {
 });
 
 /* ── picking ─────────────────────────────────────────────────────────── */
+
+// Notes decide their own hover state from the pointer, because their toolbar
+// and handles live outside the paper quad.
+window.addEventListener('pointermove', (e) => {
+  notes.remember(e.clientX, e.clientY);
+  notes.hoverAt(e.clientX, e.clientY);
+}, { passive: true });
 
 const solid = (x, y, z) => world.get(x, y, z) !== undefined;
 
@@ -64,23 +82,32 @@ function hexA(hex, a) {
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 }
 
-/** Ghost preview for the active tool (or for a note being dropped). */
-function ghostVisual(hit, forceNote = false) {
+/** Ghost preview for the active tool, or the tile a new note would occupy. */
+function ghostVisual(hit) {
   if (!hit) return null;
-  const isNote = forceNote || state.tool === 'note';
-  const cells = isNote
-    ? [{ x: hit.x, y: hit.y, z: hit.ground ? 0 : hit.z + 1 }]
-    : targetsFor(world, hit, state.tool, state.brush);
-  const fill = isNote ? 'rgba(255,214,102,0.45)'
-    : state.tool === 'dig' ? 'rgba(255,90,80,0.35)'
-      : state.tool === 'paint' ? 'rgba(255,255,255,0.30)'
-        : hexA(PALETTE[state.mat].color, 0.38);
+  const outline = 'rgba(255,255,255,0.6)';
+
+  if (state.tool === 'note') {
+    const { w, h } = NOTE_NEW;
+    const tile = {
+      x: hit.x - ((w - 1) >> 1),
+      y: hit.y - ((h - 1) >> 1),
+      w, h,
+    };
+    tile.level = world.surfaceUnder(tile.x, tile.y, tile.w, tile.h);
+    return { hit, cells: [], tile, fill: 'rgba(255,214,102,0.34)', outline, cursor: null };
+  }
+
+  const cells = targetsFor(world, hit, state.tool, state.brush);
+  const fill = state.tool === 'dig' ? 'rgba(255,90,80,0.35)'
+    : state.tool === 'paint' ? 'rgba(255,255,255,0.30)'
+      : hexA(PALETTE[state.mat].color, 0.38);
   // A click on bare ground targets the ground cell itself, so the cursor
   // marker is a flat rhombus on the plane rather than a cube.
   const cursor = hit.ground
     ? { x: hit.x, y: hit.y, z: 0, flat: true }
     : { x: hit.x, y: hit.y, z: hit.z, flat: false };
-  return { hit, cells, fill, outline: 'rgba(255,255,255,0.6)', cursor };
+  return { hit, cells, tile: null, fill, outline, cursor };
 }
 
 /* ── frame loop ──────────────────────────────────────────────────────── */
@@ -91,7 +118,7 @@ function invalidate() {
 
 function frame() {
   frameHandle = 0;
-  renderer.hover = noteGhost ? ghostVisual(noteGhost, true) : ghostVisual(hover);
+  renderer.hover = ghostVisual(hover);
   renderer.render();
   notes.sync(cam);
   updateStatus();
@@ -267,6 +294,7 @@ canvas.addEventListener('pointermove', (e) => {
     cam.ox += now.mx - pinch.mx;
     cam.oy += now.my - pinch.my;
     pinch = now;
+    notes.rehover();
     invalidate();
     return;
   }
@@ -275,6 +303,7 @@ canvas.addEventListener('pointermove', (e) => {
     cam.ox += e.clientX - pan.x;
     cam.oy += e.clientY - pan.y;
     pan = { x: e.clientX, y: e.clientY };
+    notes.rehover();
     invalidate();
     return;
   }
@@ -309,7 +338,10 @@ canvas.addEventListener('pointerup', onUp);
 canvas.addEventListener('pointercancel', onUp);
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-canvas.addEventListener('wheel', (e) => {
+// Bound to the window so the wheel keeps panning/zooming even when the cursor
+// is over a note tile; modals keep their own scrolling.
+window.addEventListener('wheel', (e) => {
+  if (e.target.closest && e.target.closest('.backdrop')) return;
   e.preventDefault();
   const r = canvas.getBoundingClientRect();
   if (e.ctrlKey || e.metaKey || e.altKey) {
@@ -328,6 +360,7 @@ function zoomAt(px, py, factor) {
   cam.ox = px - (px - cam.ox) * (s1 / s0);
   cam.oy = py - (py - cam.oy) * (s1 / s0);
   cam.scale = s1;
+  notes.rehover();
   invalidate();
 }
 
@@ -335,11 +368,12 @@ function zoomAt(px, py, factor) {
 
 function createNote(hit) {
   if (!hit) return;
+  const { w, h } = NOTE_NEW;
   const note = {
-    id: 'n' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
-    x: hit.x + 0.5,
-    y: hit.y + 0.5,
-    z: anchorZ(hit),
+    id: uid(),
+    x: hit.x - ((w - 1) >> 1),
+    y: hit.y - ((h - 1) >> 1),
+    w, h,
     color: 0,
     html: '<p><br></p>',
   };

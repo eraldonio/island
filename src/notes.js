@@ -1,18 +1,32 @@
-// Sticky notes: real DOM elements floating over the canvas.
+// Sticky notes: a w*h block tile lying flat on the surface.
 //
-// Notes are the one thing in this app that must be text-editable, so they stay
-// in the DOM (contenteditable) instead of being drawn. The layer is
-// pointer-events:none and each note re-enables them, so panning and sculpting
-// keep working everywhere else.
+// The paper itself is drawn by the renderer in the voxel painter order, so a
+// hill in front of a note covers it instead of the note floating over it. What
+// lives in the DOM is the ink: text transformed into the ground plane with the
+// same affine matrix as the projection, which keeps it real contenteditable
+// (caret, selection, Ctrl+B/I/U) while looking like writing on a sticker.
 
-import { project } from './iso.js';
-import { PAPER } from './world.js';
+import { project, raycast, NOTE_U, HW, HH } from './iso.js';
+import { PAPER, NOTE_MIN, NOTE_MAX } from './world.js';
 
 const ALLOWED = new Set([
   'P', 'BR', 'DIV', 'SPAN', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'DEL',
   'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'PRE',
   'CODE', 'A', 'HR', 'SUB', 'SUP',
 ]);
+
+// Sample points across the tile, as fractions of its width/height. Occlusion is
+// a property of the world and the fixed camera, never of the pan, so this only
+// has to be recomputed when the world changes.
+const SAMPLES = [[0.5, 0.5], [0.06, 0.5], [0.94, 0.5], [0.5, 0.06], [0.5, 0.94]];
+const BURIED_AT = 0.8;
+
+// Preview sizes tried in order; the last one is the floor before clipping.
+const FIT_SIZES = [12.5, 11, 9.5];
+
+// How far outside the paper (in tile-local px) still counts as "on the note".
+// Large enough to bridge the gap to the hover toolbar and the corner handles.
+const HOT_MARGIN = 44;
 
 function safeStyle(raw) {
   const keep = [];
@@ -69,19 +83,116 @@ export function sanitizeHtml(html) {
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 
 export class Notes {
-  /** @param {{pickAt:Function,onGhost:Function,onDrop:Function,onCycleColor:Function,onExpand:Function,onDelete:Function,onTextEdit:Function,onFocusNote:Function}} hooks */
+  /** @param {{cam:Function,pickAt:Function,onGhost:Function,onDrop:Function,onResize:Function,onResizeCommit:Function,onCycleColor:Function,onExpand:Function,onDelete:Function,onTextEdit:Function,onFocusNote:Function}} hooks */
   constructor(layer, world, hooks) {
     this.layer = layer;
     this.world = world;
     this.hooks = hooks;
     this.els = new Map();
+    this.rev = -1;
+    this.solid = (x, y, z) => world.get(x, y, z) !== undefined;
   }
 
   element(id) { return this.els.get(id); }
-  body(id) { const el = this.els.get(id); return el ? el.querySelector('.body') : null; }
+  ink(id) { const el = this.els.get(id); return el ? el.querySelector('.ink') : null; }
 
-  /** Create / destroy / reposition note elements to match the world. */
+  /* ── ground-plane maths ────────────────────────────────────────────── */
+
+  /** Affine matrix [a,b,c,d] mapping tile-local px to screen px at zoom 1. */
+  matrix(cam) {
+    const k = cam.scale / NOTE_U;
+    return [HW * k, HH * k, -HW * k, HH * k];
+  }
+
+  originOf(note, cam) {
+    const level = this.world.surfaceUnder(note.x, note.y, note.w, note.h);
+    const p = project(note.x, note.y, level);
+    const r = this.layer.getBoundingClientRect();
+    return { x: r.left + cam.ox + p.x * cam.scale, y: r.top + cam.oy + p.y * cam.scale };
+  }
+
+  /** Client point -> tile-local px, i.e. the inverse of matrix(). */
+  toLocal(clientX, clientY, note, cam) {
+    const o = this.originOf(note, cam);
+    const [a, b, c, d] = this.matrix(cam);
+    const det = a * d - c * b;
+    const dx = clientX - o.x;
+    const dy = clientY - o.y;
+    return { x: (d * dx - c * dy) / det, y: (-b * dx + a * dy) / det };
+  }
+
+  /* ── per-world-revision geometry ───────────────────────────────────── */
+
+  /**
+   * A note rests on the highest block under its footprint, which is derived
+   * from the terrain every time rather than cached: moving a tile, undoing a
+   * move, or building under it must all re-derive it consistently with the
+   * renderer. Only the (much costlier) occlusion verdict is cached per revision.
+   */
+  regen(note) {
+    note.buried = this.occlusion(note) >= BURIED_AT;
+  }
+
+  /** Fraction of the tile hidden behind blocks that sit in front of it. */
+  occlusion(note) {
+    const L = this.world.surfaceUnder(note.x, note.y, note.w, note.h);
+    let hidden = 0;
+    for (const [fx, fy] of SAMPLES) {
+      const px = note.x + fx * note.w;
+      const py = note.y + fy * note.h;
+      const s = project(px, py, L);
+      const hit = raycast(s.x, s.y, this.solid);
+      if (hit.ground) continue;   // no block anywhere along this ray, so nothing hides the tile
+      if (hit.x + hit.y + hit.z > px + py + L - 1) hidden++;
+    }
+    return hidden / SAMPLES.length;
+  }
+
+  /* ── hover proximity ───────────────────────────────────────────────── */
+
+  /**
+   * The toolbar and the resize handles sit outside the paper quad, so plain
+   * :hover on the tile can never reach them. Track the pointer against the
+   * quad grown by a margin instead, and against the toolbar's own box.
+   */
+  hoverAt(clientX, clientY) {
+    const cam = this.hooks.cam();
+    const [a, b, c, d] = this.matrix(cam);
+    const det = a * d - c * b;
+    for (const note of this.world.notes) {
+      const el = this.els.get(note.id);
+      if (!el) continue;
+      const o = this.originOf(note, cam);
+      const dx = clientX - o.x;
+      const dy = clientY - o.y;
+      const lx = (d * dx - c * dy) / det;
+      const ly = (-b * dx + a * dy) / det;
+      const w = note.w * NOTE_U;
+      const h = note.h * NOTE_U;
+      let hot = lx >= -HOT_MARGIN && lx <= w + HOT_MARGIN && ly >= -HOT_MARGIN && ly <= h + HOT_MARGIN;
+      if (!hot && el.classList.contains('hot')) {
+        const t = el.querySelector('.tools').getBoundingClientRect();
+        hot = clientX >= t.left - 4 && clientX <= t.right + 4 && clientY >= t.top - 4 && clientY <= t.bottom + 4;
+      }
+      el.classList.toggle('hot', hot);
+    }
+  }
+
+  /** Re-run the proximity test after the world moves under a still pointer. */
+  rehover() {
+    if (this.lastPointer) this.hoverAt(this.lastPointer.x, this.lastPointer.y);
+  }
+
+  remember(x, y) { this.lastPointer = { x, y }; }
+
+  /* ── frame sync ────────────────────────────────────────────────────── */
+
   sync(cam) {
+    if (this.world.rev !== this.rev) {
+      this.rev = this.world.rev;
+      for (const note of this.world.notes) this.regen(note);
+    }
+
     const live = new Set();
     for (const note of this.world.notes) {
       live.add(note.id);
@@ -91,90 +202,120 @@ export class Notes {
         this.els.set(note.id, el);
         this.layer.appendChild(el);
       }
-      const paper = PAPER[((note.color | 0) % PAPER.length + PAPER.length) % PAPER.length];
-      if (el.dataset.paper !== paper) {
-        el.dataset.paper = paper;
-        el.style.setProperty('--paper', paper);
-      }
-
-      // Converge the card text on the model — undo/redo changes it behind our
-      // back. Text the user is editing (inline or in the popup) wins.
-      const body = el.querySelector('.body');
-      if (el.live || document.activeElement === body) {
-        el.html = note.html;
-      } else if (el.html !== note.html) {
-        body.innerHTML = note.html || '<p><br></p>';
-        el.html = note.html;
-      }
-
+      this.paint(el, note);
       if (el.dataset.dragging !== '1') this.place(el, note, cam);
+      // measure the text only once the sheet has its block size
+      if (!el.dataset.fitted) { el.dataset.fitted = '1'; this.fit(el); }
     }
+
     for (const [id, el] of this.els) {
       if (!live.has(id)) { el.remove(); this.els.delete(id); }
     }
   }
 
+  paint(el, note) {
+    const paper = PAPER[((note.color | 0) % PAPER.length + PAPER.length) % PAPER.length];
+    if (el.dataset.paper !== paper) {
+      el.dataset.paper = paper;
+      el.style.setProperty('--paper', paper);
+    }
+
+    // Converge the card text on the model — undo/redo changes it behind our
+    // back. Text the user is editing (inline or in the popup) wins.
+    const ink = el.querySelector('.ink');
+    if (el.live || document.activeElement === ink) {
+      el.html = note.html;
+    } else if (el.html !== note.html) {
+      ink.innerHTML = note.html || '<p><br></p>';
+      el.html = note.html;
+      this.fit(el);
+    }
+
+    const size = el.querySelector('.size');
+    const label = `${note.w}×${note.h}`;
+    if (size.textContent !== label) size.textContent = label;
+    el.classList.toggle('buried', !!note.buried);
+  }
+
+  /**
+   * Smart preview: step the text size down while it still helps, then clip at a
+   * whole line so the tile never shows a half line or a word cut in half.
+   */
+  fit(el) {
+    const ink = el.querySelector('.ink');
+    if (!ink || !ink.clientHeight) return;   // nothing to measure until attached
+    ink.style.height = '';
+
+    let fits = false;
+    let lines = 1;
+    let lh = 0;
+    let pad = 0;
+    for (const size of FIT_SIZES) {
+      ink.style.fontSize = size + 'px';
+      const cs = getComputedStyle(ink);
+      lh = parseFloat(cs.lineHeight) || size * 1.25;
+      pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+      lines = Math.max(1, Math.floor((ink.clientHeight - pad) / lh));
+      if (ink.scrollHeight <= ink.clientHeight + 0.5) { fits = true; break; }
+    }
+    if (!fits) ink.style.height = Math.min(ink.clientHeight, Math.ceil(pad + lines * lh)) + 'px';
+
+    el.classList.toggle('tight', !fits);
+    el.dataset.lines = String(lines);
+    const badge = el.querySelector('.size');
+    if (badge) badge.title = fits ? 'Tile size in blocks' : 'Text is clipped — resize the tile or open the editor';
+  }
+
   place(el, note, cam) {
-    const p = project(note.x, note.y, note.z);
-    const x = cam.ox + p.x * cam.scale;
-    const y = cam.oy + p.y * cam.scale;
-    const k = clamp(cam.scale, 0.55, 1.25);
-    el.dataset.k = k;
-    el.style.transform = `translate3d(${x}px, ${y}px, 0) scale(${k})`;
-    el.style.zIndex = String(1000 + Math.round(y));
+    const o = this.originOf(note, cam);
+    el.style.transform = `translate3d(${o.x}px, ${o.y}px, 0)`;
+    el.style.zIndex = String(1000 + Math.round(o.y));
+
+    const [a, b, c, d] = this.matrix(cam);
+    const sheet = el.querySelector('.sheet');
+    sheet.style.transform = `matrix(${a},${b},${c},${d},0,0)`;
+
+    const w = note.w * NOTE_U;
+    const h = note.h * NOTE_U;
+    sheet.style.width = w + 'px';
+    sheet.style.height = h + 'px';
+
+    const hz = sheet.querySelectorAll('.hz');
+    this.put(hz[0], w, 0);      // grows w
+    this.put(hz[1], 0, h);      // grows h
+    this.put(hz[2], w, h);      // grows both
+    el.classList.toggle('small', note.w * note.h < 6);
   }
 
-  /** Write the note's html into its card (used by the popup editor mirror). */
-  setHtml(id, html) {
-    const el = this.els.get(id);
-    const body = el && el.querySelector('.body');
-    if (!body || document.activeElement === body) return;
-    el.live = true;
-    if (el.html === html) return;
-    body.innerHTML = html || '<p><br></p>';
-    el.html = html;
+  put(node, left, top) {
+    node.style.left = left + 'px';
+    node.style.top = top + 'px';
   }
 
-  /** Mark a note as owned by the popup editor, or hand it back to the model. */
-  setEditing(id, on) {
-    const el = this.els.get(id);
-    if (!el) return;
-    el.live = on;
-    if (!on) el.html = null;   // force the next sync to repaint from the model
-  }
-
-  /** Focus a note's text and put the caret at the end. */
-  beginEdit(id) {
-    const body = this.body(id);
-    if (!body) return;
-    body.focus();
-    const r = document.createRange();
-    r.selectNodeContents(body);
-    r.collapse(false);
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(r);
-  }
+  /* ── DOM ───────────────────────────────────────────────────────────── */
 
   create(note) {
     const el = document.createElement('div');
     el.className = 'note fresh';
     el.dataset.id = note.id;
     el.innerHTML =
-      '<div class="stem"></div>' +
-      '<div class="card">' +
-        '<div class="bar">' +
-          '<span class="paper-dot"></span>' +
-          '<span class="grip"></span>' +
-          '<button class="n-color" title="Cycle paper colour">●</button>' +
-          '<button class="n-expand" title="Open the big editor">⤢</button>' +
-          '<button class="n-del" title="Delete note">×</button>' +
-        '</div>' +
-        '<div class="body" contenteditable="true"></div>' +
+      '<div class="sheet">' +
+        '<div class="ink" contenteditable="true"></div>' +
+        '<span class="hz" data-edge="w" title="Drag to resize in blocks"></span>' +
+        '<span class="hz" data-edge="h" title="Drag to resize in blocks"></span>' +
+        '<span class="hz" data-edge="wh" title="Drag to resize in blocks"></span>' +
+      '</div>' +
+      '<div class="tools">' +
+        '<span class="size"></span>' +
+        '<button class="n-grip" title="Drag to move the note">⠿</button>' +
+        '<button class="n-color" title="Cycle paper colour">●</button>' +
+        '<button class="n-expand" title="Open the big editor">⤢</button>' +
+        '<button class="n-del" title="Delete note">×</button>' +
       '</div>';
 
-    const body = el.querySelector('.body');
-    body.innerHTML = note.html || '<p><br></p>';
+    const sheet = el.querySelector('.sheet');
+    const ink = el.querySelector('.ink');
+    ink.innerHTML = note.html || '<p><br></p>';
     el.html = note.html || '';
     setTimeout(() => el.classList.remove('fresh'), 200);
 
@@ -191,77 +332,175 @@ export class Notes {
       this.hooks.onDelete(note.id);
     });
 
-    // ── inline WYSIWYG editing ──
+    // ── inline WYSIWYG ──
     let before = null;
-    body.addEventListener('focus', () => {
-      before = body.innerHTML;
+    ink.addEventListener('focus', () => {
+      before = ink.innerHTML;
       this.hooks.onFocusNote(note.id);
     });
-    body.addEventListener('blur', () => {
-      if (before !== null && before !== body.innerHTML) {
-        this.hooks.onTextEdit(note.id, before, body.innerHTML);
+    ink.addEventListener('blur', () => {
+      if (before !== null && before !== ink.innerHTML) {
+        this.hooks.onTextEdit(note.id, before, ink.innerHTML);
+        this.fit(el);
       }
       before = null;
     });
-    body.addEventListener('dblclick', (e) => {
+    ink.addEventListener('dblclick', (e) => {
       e.stopPropagation();
       this.hooks.onExpand(note.id);
     });
-    body.addEventListener('paste', (e) => {
+    ink.addEventListener('paste', (e) => {
       e.preventDefault();
       const data = e.clipboardData;
       if (!data) return;
       const html = data.getData('text/html');
-      if (html) {
-        document.execCommand('insertHTML', false, sanitizeHtml(html));
-      } else {
-        document.execCommand('insertText', false, data.getData('text/plain') || '');
-      }
+      if (html) document.execCommand('insertHTML', false, sanitizeHtml(html));
+      else document.execCommand('insertText', false, data.getData('text/plain') || '');
+      this.fit(el);
     });
-    body.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); body.blur(); }
+    ink.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); ink.blur(); }
       e.stopPropagation();
     });
 
-    // ── drag the note by its bar ──
-    const bar = el.querySelector('.bar');
+    // dragging the paper out of the way must not drag the world
+    sheet.addEventListener('pointerdown', (e) => e.stopPropagation());
+    sheet.addEventListener('dblclick', (e) => e.stopPropagation());
+
+    this.wireGrip(el, sheet, ink, note);
+    for (const hz of sheet.querySelectorAll('.hz')) this.wireHandle(el, hz, note);
+    return el;
+  }
+
+  wireGrip(el, sheet, ink, note) {
+    const grip = el.querySelector('.n-grip');
     let drag = null;
 
-    bar.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0 || e.target.closest('button')) return;
+    grip.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
       e.preventDefault();
       e.stopPropagation();
-      bar.setPointerCapture(e.pointerId);
-      drag = { x0: e.clientX, y0: e.clientY, moved: false };
+      grip.setPointerCapture(e.pointerId);
+      const cam = this.hooks.cam();
+      const local = this.toLocal(e.clientX, e.clientY, note, cam);
+      drag = {
+        start: { x: note.x, y: note.y },
+        grab: {
+          i: clamp(Math.floor(local.x / NOTE_U), 0, note.w - 1),
+          j: clamp(Math.floor(local.y / NOTE_U), 0, note.h - 1),
+        },
+      };
       el.dataset.dragging = '1';
       el.classList.add('dragging');
+      this.hooks.onDragStart(note.id);
     });
 
-    bar.addEventListener('pointermove', (e) => {
+    const finish = (e, commit) => {
       if (!drag) return;
-      if (Math.abs(e.clientX - drag.x0) + Math.abs(e.clientY - drag.y0) > 3) drag.moved = true;
-      el.style.transform = `translate3d(${e.clientX}px, ${e.clientY}px, 0) scale(${el.dataset.k})`;
-      el.style.zIndex = '4000';
-      this.hooks.onGhost(this.hooks.pickAt(e.clientX, e.clientY));
-    });
-
-    const endDrag = (e) => {
-      if (!drag) return;
-      const moved = drag.moved;
+      const start = drag.start;
       drag = null;
       delete el.dataset.dragging;
       el.classList.remove('dragging');
       this.hooks.onGhost(null);
-      if (moved) {
-        this.hooks.onDrop(note.id, this.hooks.pickAt(e.clientX, e.clientY));
+      const moved = note.x !== start.x || note.y !== start.y;
+      if (commit && moved) {
+        this.hooks.onDrop(note.id, start, { x: note.x, y: note.y });
       } else {
-        const live = this.world.note(note.id);
-        if (live) this.place(el, live, this.hooks.cam());
+        if (moved && !commit) { note.x = start.x; note.y = start.y; this.regen(note); }
+        this.place(el, note, this.hooks.cam());
+        this.hooks.onResize(note.id);
       }
     };
-    bar.addEventListener('pointerup', endDrag);
-    bar.addEventListener('pointercancel', endDrag);
 
-    return el;
+    grip.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const hit = this.hooks.pickAt(e.clientX, e.clientY);
+      if (!hit) return;
+      const nx = hit.x - drag.grab.i;
+      const ny = hit.y - drag.grab.j;
+      if (nx === note.x && ny === note.y) return;
+      note.x = nx;
+      note.y = ny;
+      this.regen(note);
+      this.place(el, note, this.hooks.cam());
+      this.hooks.onResize(note.id);
+    });
+
+    grip.addEventListener('pointerup', (e) => finish(e, true));
+    grip.addEventListener('pointercancel', (e) => finish(e, false));
+  }
+
+  wireHandle(el, hz, note) {
+    const edge = hz.dataset.edge;
+    let active = false;
+    let start = null;
+
+    hz.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      hz.setPointerCapture(e.pointerId);
+      active = true;
+      start = { w: note.w, h: note.h };
+      el.classList.add('resizing');
+    });
+
+    hz.addEventListener('pointermove', (e) => {
+      if (!active) return;
+      const cam = this.hooks.cam();
+      const local = this.toLocal(e.clientX, e.clientY, note, cam);
+      const w = edge === 'h' ? note.w : clamp(Math.round(local.x / NOTE_U), NOTE_MIN, NOTE_MAX);
+      const h = edge === 'w' ? note.h : clamp(Math.round(local.y / NOTE_U), NOTE_MIN, NOTE_MAX);
+      if (w === note.w && h === note.h) return;
+      note.w = w;
+      note.h = h;
+      this.regen(note);
+      this.place(el, note, cam);
+      this.paint(el, note);
+      this.fit(el);
+      this.hooks.onResize(note.id);
+    });
+
+    const end = () => {
+      if (!active) return;
+      active = false;
+      el.classList.remove('resizing');
+      this.hooks.onResizeEnd(note.id, start, { w: note.w, h: note.h });
+      start = null;
+    };
+    hz.addEventListener('pointerup', end);
+    hz.addEventListener('pointercancel', end);
+  }
+
+  /* ── editing ───────────────────────────────────────────────────────── */
+
+  setHtml(id, html) {
+    const el = this.els.get(id);
+    const ink = el && el.querySelector('.ink');
+    if (!ink || document.activeElement === ink) return;
+    el.live = true;
+    if (el.html === html) return;
+    ink.innerHTML = html || '<p><br></p>';
+    el.html = html;
+    this.fit(el);
+  }
+
+  setEditing(id, on) {
+    const el = this.els.get(id);
+    if (!el) return;
+    el.live = on;
+    if (!on) el.html = null;   // force the next sync to repaint from the model
+  }
+
+  beginEdit(id) {
+    const ink = this.ink(id);
+    if (!ink) return;
+    ink.focus();
+    const r = document.createRange();
+    r.selectNodeContents(ink);
+    r.collapse(false);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
   }
 }
