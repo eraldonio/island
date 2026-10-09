@@ -29,12 +29,18 @@
     <button class="tbtn" data-tool="pan" title="Pan — drag to move the world (H, or hold Space)">
       <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5v15M2.5 10h15"/><path d="M10 2.5 7.6 5.2M10 2.5l2.4 2.7M10 17.5l-2.4-2.7M10 17.5l2.4-2.7M2.5 10l2.7-2.4M2.5 10l2.7 2.4M17.5 10l-2.7-2.4M17.5 10l-2.7 2.4"/></svg>
     </button>
+    <button class="tbtn" data-tool="stamp" title="Place a model from the gallery (M)">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.2 15.4 6v6.4L10 15.2 4.6 12.4V6z"/><path d="M4.6 6 10 8.8l5.4-2.8M10 8.8v6.4"/><path d="M6 16.6h8"/></svg>
+    </button>
   </div>
   <div class="divider"></div>
   <div class="swatches" id="swatches" aria-label="Materials"></div>
   <div class="divider"></div>
   <div class="brushes" id="brushes" aria-label="Brush size"></div>
 </div>
+
+<!-- ── model gallery ───────────────────────────────────────────────────── -->
+<div id="gallery" class="panel gallery" hidden aria-label="Models"></div>
 
 <!-- ── status ──────────────────────────────────────────────────────────── -->
 <div id="status" class="panel status" aria-live="polite">
@@ -54,9 +60,15 @@
   <button class="abtn" id="a-zout" title="Zoom out (−)">−</button>
   <button class="abtn" id="a-zin" title="Zoom in (+)">+</button>
   <button class="abtn" id="a-view" title="Centre view (0)">◎</button>
-  <label class="viewctl" title="View angle — drag right to face the notes (V)">
-    <input id="a-tilt" type="range" min="0" max="100" value="0" step="1" aria-label="View angle" />
-    <span id="a-tilt-val" class="mono">0%</span>
+  <label class="viewctl" title="Spin — turn the world around; any angle works">
+    <span class="vlabel">spin</span>
+    <input id="a-spin" type="range" min="0" max="360" value="45" step="1" aria-label="View spin" />
+    <span id="a-spin-val" class="mono">45°</span>
+  </label>
+  <label class="viewctl" title="Tilt — raise the camera from edge-on to straight down (V toggles the preset)">
+    <span class="vlabel">tilt</span>
+    <input id="a-tilt" type="range" min="10" max="90" value="30" step="1" aria-label="View tilt" />
+    <span id="a-tilt-val" class="mono">30°</span>
   </label>
   <span class="sep"></span>
   <button class="abtn" id="a-export" title="Export world as JSON">⤓</button>
@@ -109,9 +121,12 @@
       <div>
         <h3>Sculpt</h3>
         <ul>
-          <li><b>Click / drag</b> — apply the current tool to the block under the cursor</li>
-          <li><b>B</b> build · <b>D</b> dig · <b>P</b> paint · <b>N</b> note · <b>H</b> pan</li>
-          <li><b>1…8</b> — pick a material</li>
+          <li><b>Click / drag</b> — apply the current tool; a drag acts once per block
+              the cursor moves into, so holding still adds nothing more</li>
+          <li><b>B</b> build · <b>D</b> dig · <b>P</b> paint · <b>N</b> note · <b>M</b> place a model · <b>H</b> pan</li>
+          <li><b>M</b> opens the model gallery: pick a prefab (tree, house, duck…), then
+              click the world — it takes the space it needs, resting on the surface</li>
+          <li><b>1…9</b> — pick a material</li>
           <li><b>[</b> / <b>]</b> — brush size (1×1, 3×3, 5×5)</li>
           <li><b>Ctrl+Z</b> / <b>Ctrl+Shift+Z</b> — undo / redo (one stroke at a time)</li>
         </ul>
@@ -122,8 +137,9 @@
           <li><b>Space+drag</b>, <b>middle-drag</b> or <b>right-drag</b> — pan the infinite world</li>
           <li><b>Wheel</b> — zoom at the cursor · <b>Shift+wheel</b> — pan · pinch on touch</li>
           <li><b>+</b> / <b>−</b> / <b>0</b> — zoom in / out / recentre</li>
-          <li><b>V</b>, or the <b>view slider</b> — turn the world to face you, so note
-              writing reads head-on instead of at an angle</li>
+          <li><b>spin</b> / <b>tilt</b> sliders — orbit the camera: any angle around,
+              and up to straight down, where note writing reads head-on</li>
+          <li><b>V</b> — jump between the isometric look and straight down</li>
         </ul>
       </div>
       <div>

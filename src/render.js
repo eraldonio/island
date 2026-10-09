@@ -3,8 +3,9 @@
 // The view is a parallel projection, so a voxel's depth is the dot product of
 // its cell with the view ray: sorting is one number per voxel, with no z-buffer
 // and no per-pixel depth. Everything on screen is expressed through the three
-// screen-space images of the world axes (U, V, W), so the same code draws the
-// isometric view and the straight-down one.
+// screen-space images of the world axes (U, V, W), and the two visible side
+// faces are chosen by the sign of the view ray, so any orbit angle draws
+// correctly — including the ones where you see the far sides of blocks.
 
 import { Z_MIN, Z_MAX, CHUNK, project, unproject, ISO } from './iso.js';
 import { PALETTE, PAPER } from './world.js';
@@ -14,7 +15,7 @@ const KEY_MASK = KEY_SHIFT - 1;
 const DEPTH_BIAS = 4096;
 const DEPTH_SCALE = 4096;
 
-function shade(hex, f) {
+export function shade(hex, f) {
   const n = parseInt(hex.slice(1), 16);
   const r = Math.round(((n >> 16) & 255) * f);
   const g = Math.round(((n >> 8) & 255) * f);
@@ -22,12 +23,118 @@ function shade(hex, f) {
   return `rgb(${r},${g},${b})`;
 }
 
+/** Packed painter key: depth along the view ray, then insertion index. */
+function depthKey(x, y, z, v, n) {
+  const depth = x * v.dx + y * v.dy + z * v.dz;
+  return Math.round((depth + DEPTH_BIAS) * DEPTH_SCALE) * KEY_SHIFT + n;
+}
+
+/** Convex outline of a point set (monotone chain). */
+function hull(points) {
+  const p = points.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+  if (p.length < 3) return p;
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower = [];
+  const upper = [];
+  for (const q of p) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop();
+    lower.push(q);
+  }
+  for (let i = p.length - 1; i >= 0; i--) {
+    const q = p[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop();
+    upper.push(q);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
+/** Screen-space images of the world x, y and z axes for a view and zoom. */
+export function basisOf(view, scale) {
+  return {
+    U: { x: view.cos * view.H * scale, y: view.sin * view.D * scale },
+    V: { x: -view.sin * view.H * scale, y: view.cos * view.D * scale },
+    W: { x: 0, y: -view.C * scale },
+  };
+}
+
+function polyPath(ctx, pts) {
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  ctx.closePath();
+}
+
+/** The 4 corners of each face of the box whose origin corner is P0. */
+function faceSet(P0, U, V, W, v) {
+  const at = (a, b, c) => ({
+    x: P0.x + (a ? U.x : 0) + (b ? V.x : 0) + (c ? W.x : 0),
+    y: P0.y + (a ? U.y : 0) + (b ? V.y : 0) + (c ? W.y : 0),
+  });
+  return {
+    top: [at(0, 0, 1), at(1, 0, 1), at(1, 1, 1), at(0, 1, 1)],
+    // The camera sees the +x face when it looks along -x, and vice versa.
+    x: v.sx > 0
+      ? [at(1, 0, 0), at(1, 1, 0), at(1, 1, 1), at(1, 0, 1)]
+      : [at(0, 0, 0), at(0, 1, 0), at(0, 1, 1), at(0, 0, 1)],
+    y: v.sy > 0
+      ? [at(0, 1, 0), at(1, 1, 0), at(1, 1, 1), at(0, 1, 1)]
+      : [at(0, 0, 0), at(1, 0, 0), at(1, 0, 1), at(0, 0, 1)],
+  };
+}
+
+/** Convex outline of a projected box. */
+function boxOutline(P0, U, V, W) {
+  const at = (a, b, c) => ({
+    x: P0.x + (a ? U.x : 0) + (b ? V.x : 0) + (c ? W.x : 0),
+    y: P0.y + (a ? U.y : 0) + (b ? V.y : 0) + (c ? W.y : 0),
+  });
+  const pts = [];
+  for (const a of [0, 1]) for (const b of [0, 1]) for (const c of [0, 1]) pts.push(at(a, b, c));
+  return hull(pts);
+}
+
+/**
+ * Painter for a static list of boxes, used for the gallery thumbnails. The live
+ * renderer has its own batched, culled path; this one trades speed for being
+ * obviously correct on any small voxel list.
+ */
+export function paintBoxes(ctx, boxes, { view, scale, ox, oy, colors }) {
+  const { U, V, W } = basisOf(view, scale);
+  const order = boxes
+    .map((b) => ({ b, d: b.x * view.dx + b.y * view.dy + b.z * view.dz }))
+    .sort((p, q) => p.d - q.d)
+    .map((p) => p.b);
+
+  ctx.lineWidth = 1;
+  ctx.lineJoin = 'round';
+  let style = '';
+  for (const box of order) {
+    const P0 = {
+      x: ox + (box.x * view.cos - box.y * view.sin) * view.H * scale,
+      y: oy + ((box.x * view.sin + box.y * view.cos) * view.D - box.z * view.C) * scale,
+    };
+    const f = faceSet(P0, U, V, W, view);
+    const col = colors[box.mat] || colors[0];
+    const faces = [[f.top, col.top]];
+    if (view.faceX) faces.push([f.x, view.sx > 0 ? col.right : col.left]);
+    if (view.faceY) faces.push([f.y, view.sy > 0 ? col.left : col.right]);
+    for (const [pts, c] of faces) {
+      if (c !== style) { ctx.fillStyle = style = c; ctx.strokeStyle = style; }
+      ctx.beginPath();
+      polyPath(ctx, pts);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+}
+
 export class Renderer {
   constructor(canvas, world) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.world = world;
-    this.cam = { ox: 0, oy: 0, scale: 1, tilt: 0, view: ISO };
+    this.cam = { ox: 0, oy: 0, scale: 1, spin: 45, tilt: 30, view: ISO };
     this.hover = null;         // { hit, cells, tile, fill, outline, cursor }
     this.colors = PALETTE.map((p) => ({
       top: p.color,
@@ -40,7 +147,7 @@ export class Renderer {
     this.resize();
   }
 
-  /** The current view parameters (kept on the camera so it is saved with it). */
+  /** The current view parameters (kept on the camera so they are saved with it). */
   get v() { return this.cam.view || ISO; }
 
   resize() {
@@ -57,15 +164,7 @@ export class Renderer {
   }
 
   /** Screen-space images of the world x, y and z axes at the current zoom. */
-  basis() {
-    const v = this.v;
-    const s = this.cam.scale;
-    return {
-      U: { x: v.cos * v.H * s, y: v.sin * v.D * s },
-      V: { x: -v.sin * v.H * s, y: v.cos * v.D * s },
-      W: { x: 0, y: -v.C * s },
-    };
-  }
+  basis() { return basisOf(this.v, this.cam.scale); }
 
   /** World point -> screen px, including pan and zoom. */
   toScreen(x, y, z) {
@@ -168,17 +267,11 @@ export class Renderer {
     const H_ = this.h;
     let n = 0;
 
-    // Silhouette of a cube relative to its top vertex, used for culling.
-    const off = [
-      [0, 0],
-      [U.x, U.y],
-      [U.x, U.y - W.y],
-      [U.x + V.x, U.y + V.y - W.y],
-      [V.x, V.y - W.y],
-      [V.x, V.y],
-    ];
+    // Bounding box of a box, relative to its origin corner, for culling.
     let minX = 0, maxX = 0, minY = 0, maxY = 0;
-    for (const [px, py] of off) {
+    for (const a of [0, 1]) for (const b of [0, 1]) for (const c of [0, 1]) {
+      const px = a * U.x + b * V.x + c * W.x;
+      const py = a * U.y + b * V.y + c * W.y;
       if (px < minX) minX = px;
       if (px > maxX) maxX = px;
       if (py < minY) minY = py;
@@ -195,15 +288,15 @@ export class Renderer {
         const y = by + ((lk >> 4) & 15);
         const z = lk >>> 8;
 
-        // Faces that cannot be seen are treated as covered, so a stack of
-        // blocks under a straight-down view collapses to its top one.
+        // Faces the camera cannot see are treated as covered, so a stack of
+        // blocks collapses to the one block that is actually visible.
         const up = world.get(x, y, z + 1) !== undefined;
-        const rt = !v.faceX || world.get(x + 1, y, z) !== undefined;
-        const lf = !v.faceY || world.get(x, y + 1, z) !== undefined;
+        const rt = !v.faceX || world.get(x + v.sx, y, z) !== undefined;
+        const lf = !v.faceY || world.get(x, y + v.sy, z) !== undefined;
         if (up && rt && lf) continue;
 
         const ax = (x * v.cos - y * v.sin) * v.H * scale + ox;
-        const ay = ((x * v.sin + y * v.cos) * v.D - (z + 1) * v.C) * scale + oy;
+        const ay = ((x * v.sin + y * v.cos) * v.D - z * v.C) * scale + oy;
         if (ax + maxX < -1 || ax + minX > W_ + 1) continue;
         if (ay + maxY < -1 || ay + minY > H_ + 1) continue;
 
@@ -246,6 +339,7 @@ export class Renderer {
   drawSorted(ctx) {
     const g = this.buf;
     const keys = g.keys;
+    const v = this.v;
     const { U, V, W } = this.basis();
     let style = '';
 
@@ -254,40 +348,31 @@ export class Renderer {
 
     for (let i = 0; i < keys.length; i++) {
       const k = keys[i] & KEY_MASK;
+      const P0 = { x: g.ax[k], y: g.ay[k] };
       if (g.kinds[k] === 1) { this.drawNoteTile(ctx, this.world.notes[g.notes[k]], g.zs[k], U, V); continue; }
+
       const m = g.masks[k];
-      const A = g.ax[k];
-      const B = g.ay[k];
       const col = this.colors[g.mats[k]];
+      const f = faceSet(P0, U, V, W, v);
 
       if (!(m & 1)) {                             // top
         if (col.top !== style) { ctx.fillStyle = style = col.top; ctx.strokeStyle = style; }
         ctx.beginPath();
-        ctx.moveTo(A, B);
-        ctx.lineTo(A + U.x, B + U.y);
-        ctx.lineTo(A + U.x + V.x, B + U.y + V.y);
-        ctx.lineTo(A + V.x, B + V.y);
-        ctx.closePath();
+        polyPath(ctx, f.top);
         ctx.fill(); ctx.stroke();
       }
-      if (!(m & 2)) {                             // +x
-        if (col.right !== style) { ctx.fillStyle = style = col.right; ctx.strokeStyle = style; }
+      if (!(m & 2) && v.faceX) {                  // the visible x face
+        const c = v.sx > 0 ? col.right : col.left;
+        if (c !== style) { ctx.fillStyle = style = c; ctx.strokeStyle = style; }
         ctx.beginPath();
-        ctx.moveTo(A + U.x, B + U.y);
-        ctx.lineTo(A + U.x + V.x, B + U.y + V.y);
-        ctx.lineTo(A + U.x + V.x - W.x, B + U.y + V.y - W.y);
-        ctx.lineTo(A + U.x - W.x, B + U.y - W.y);
-        ctx.closePath();
+        polyPath(ctx, f.x);
         ctx.fill(); ctx.stroke();
       }
-      if (!(m & 4)) {                             // +y
-        if (col.left !== style) { ctx.fillStyle = style = col.left; ctx.strokeStyle = style; }
+      if (!(m & 4) && v.faceY) {                  // the visible y face
+        const c = v.sy > 0 ? col.left : col.right;
+        if (c !== style) { ctx.fillStyle = style = c; ctx.strokeStyle = style; }
         ctx.beginPath();
-        ctx.moveTo(A + V.x, B + V.y);
-        ctx.lineTo(A + U.x + V.x, B + U.y + V.y);
-        ctx.lineTo(A + U.x + V.x - W.x, B + U.y + V.y - W.y);
-        ctx.lineTo(A + V.x - W.x, B + V.y - W.y);
-        ctx.closePath();
+        polyPath(ctx, f.y);
         ctx.fill(); ctx.stroke();
       }
     }
@@ -345,6 +430,7 @@ export class Renderer {
   drawHover(ctx) {
     const hv = this.hover;
     if (!hv || !hv.hit) return;
+    const v = this.v;
     const { U, V, W } = this.basis();
 
     if (hv.tile) {
@@ -367,23 +453,10 @@ export class Renderer {
       ctx.fillStyle = hv.fill;
       ctx.beginPath();
       for (const c of hv.cells) {
-        const p = this.toScreen(c.x, c.y, c.z + 1);
-        const A = p.x, B = p.y;
-        ctx.moveTo(A, B);
-        ctx.lineTo(A + U.x, B + U.y);
-        ctx.lineTo(A + U.x + V.x, B + U.y + V.y);
-        ctx.lineTo(A + V.x, B + V.y);
-        ctx.closePath();
-        ctx.moveTo(A + U.x, B + U.y);
-        ctx.lineTo(A + U.x + V.x, B + U.y + V.y);
-        ctx.lineTo(A + U.x + V.x - W.x, B + U.y + V.y - W.y);
-        ctx.lineTo(A + U.x - W.x, B + U.y - W.y);
-        ctx.closePath();
-        ctx.moveTo(A + V.x, B + V.y);
-        ctx.lineTo(A + U.x + V.x, B + U.y + V.y);
-        ctx.lineTo(A + U.x + V.x - W.x, B + U.y + V.y - W.y);
-        ctx.lineTo(A + V.x - W.x, B + V.y - W.y);
-        ctx.closePath();
+        const f = faceSet(this.toScreen(c.x, c.y, c.z), U, V, W, v);
+        polyPath(ctx, f.top);
+        if (v.faceX) polyPath(ctx, f.x);
+        if (v.faceY) polyPath(ctx, f.y);
       }
       ctx.fill();
     }
@@ -392,30 +465,19 @@ export class Renderer {
       const c = hv.cursor;
       ctx.strokeStyle = hv.outline;
       ctx.lineWidth = 1.5;
-      const p = this.toScreen(c.x, c.y, c.z + 1);
-      const A = p.x, B = p.y;
+      const P0 = this.toScreen(c.x, c.y, c.z);
       ctx.beginPath();
       if (c.flat) {
-        ctx.moveTo(A, B);
-        ctx.lineTo(A + U.x, B + U.y);
-        ctx.lineTo(A + U.x + V.x, B + U.y + V.y);
-        ctx.lineTo(A + V.x, B + V.y);
+        polyPath(ctx, [
+          { x: P0.x + W.x, y: P0.y + W.y },
+          { x: P0.x + W.x + U.x, y: P0.y + W.y + U.y },
+          { x: P0.x + W.x + U.x + V.x, y: P0.y + W.y + U.y + V.y },
+          { x: P0.x + W.x + V.x, y: P0.y + W.y + V.y },
+        ]);
       } else {
-        ctx.moveTo(A, B);
-        ctx.lineTo(A + U.x, B + U.y);
-        ctx.lineTo(A + U.x - W.x, B + U.y - W.y);
-        ctx.lineTo(A + U.x + V.x - W.x, B + U.y + V.y - W.y);
-        ctx.lineTo(A + V.x - W.x, B + V.y - W.y);
-        ctx.lineTo(A + V.x, B + V.y);
+        polyPath(ctx, boxOutline(P0, U, V, W));
       }
-      ctx.closePath();
       ctx.stroke();
     }
   }
-}
-
-/** Packed painter key: depth along the view ray, then insertion index. */
-function depthKey(x, y, z, v, n) {
-  const depth = x * v.dx + y * v.dy + z * v.dz;
-  return Math.round((depth + DEPTH_BIAS) * DEPTH_SCALE) * KEY_SHIFT + n;
 }

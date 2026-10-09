@@ -3,8 +3,10 @@
 import { World, PALETTE, PAPER, seedStarter, uid, NOTE_NEW } from './world.js';
 import { Renderer } from './render.js';
 import { Notes, sanitizeHtml } from './notes.js';
-import { raycast, viewOf, ISO } from './iso.js';
+import { raycast, viewOf, ISO, SPIN0, TILT0, TILT_MAX } from './iso.js';
 import { targetsFor, BRUSHES } from './tools.js';
+import { Gallery } from './gallery.js';
+import { modelCells } from './models.js';
 import * as store from './store.js';
 
 const $ = (id) => document.getElementById(id);
@@ -86,6 +88,10 @@ function hexA(hex, a) {
 function ghostVisual(hit) {
   if (!hit) return null;
   const outline = 'rgba(255,255,255,0.6)';
+
+  if (state.tool === 'stamp') {
+    return { hit, cells: stampCells(hit), tile: null, fill: 'rgba(255,255,255,0.30)', outline, cursor: null };
+  }
 
   if (state.tool === 'note') {
     const { w, h } = NOTE_NEW;
@@ -206,6 +212,8 @@ function exec(cmd, val) {
 let mode = null;          // null | 'pan' | 'sculpt'
 let pan = null;
 let strokeKeys = null;
+let strokeColumn = null;  // "x,y" of the column the stroke last acted on
+let strokeAt = null;      // client point of that action
 const pointers = new Map();
 let pinch = null;
 
@@ -213,13 +221,32 @@ function startSculpt(e) {
   canvas.setPointerCapture(e.pointerId);
   mode = 'sculpt';
   strokeKeys = new Set();
+  strokeColumn = null;
+  strokeAt = null;
   world.beginStroke();
   sculptAt(e);
 }
 
+/**
+ * One action per block the cursor moves *into*. Without this, holding the
+ * button still keeps stacking blocks: the block just placed becomes the
+ * topmost thing under the cursor, so the next pick targets the cell above it.
+ * A small dead zone also absorbs jitter along a cell boundary.
+ */
 function sculptAt(e) {
   const hit = pickAt(e.clientX, e.clientY);
   hover = hit;
+
+  const column = hit.x + ',' + hit.y;
+  if (column === strokeColumn) { invalidate(); return; }
+  if (strokeAt) {
+    const dx = e.clientX - strokeAt.x;
+    const dy = e.clientY - strokeAt.y;
+    if (dx * dx + dy * dy < 9) { invalidate(); return; }
+  }
+  strokeColumn = column;
+  strokeAt = { x: e.clientX, y: e.clientY };
+
   const cells = targetsFor(world, hit, state.tool, state.brush);
   const fresh = [];
   for (const c of cells) {
@@ -239,9 +266,43 @@ function finishStroke(save) {
   if (mode === 'sculpt') {
     world.endStroke();
     strokeKeys = null;
+    strokeColumn = null;
+    strokeAt = null;
     if (save) requestSave();
   }
   mode = null;
+}
+
+/* ── models ──────────────────────────────────────────────────────────── */
+
+let gallery = null;
+
+/**
+ * Where a stamped model lands: the column the click targets (the neighbour of a
+ * side face, so a model placed against a wall stands beside it), resting on
+ * that column's surface.
+ */
+function stampTarget(hit) {
+  const cx = hit.ground ? hit.x : hit.x + hit.nx;
+  const cy = hit.ground ? hit.y : hit.y + hit.ny;
+  return { cx, cy, z: world.surfaceUnder(cx, cy, 1, 1) };
+}
+
+/** The model's voxels in world cells, footprint centred on the clicked column. */
+function stampCells(hit) {
+  const model = gallery && gallery.model;
+  if (!model) return [];
+  const t = stampTarget(hit);
+  return modelCells(model, t.cx, t.cy, t.z);
+}
+
+/** Stamp the selected model: one undoable edit, overwriting whatever is there. */
+function placeStamp(hit) {
+  const cells = stampCells(hit);
+  if (!cells.length) return;
+  world.apply(cells);
+  invalidate();
+  requestSave();
 }
 
 function pinchState() {
@@ -279,6 +340,10 @@ canvas.addEventListener('pointerdown', (e) => {
 
   if (e.shiftKey || state.tool === 'note') {
     createNote(pickAt(e.clientX, e.clientY));
+    return;
+  }
+  if (state.tool === 'stamp') {
+    placeStamp(pickAt(e.clientX, e.clientY));
     return;
   }
   startSculpt(e);
@@ -388,7 +453,7 @@ function createNote(hit) {
 
 /* ── toolbar / status ────────────────────────────────────────────────── */
 
-const TOOL_LABEL = { build: 'Build', dig: 'Dig', paint: 'Paint', note: 'Note', pan: 'Pan' };
+const TOOL_LABEL = { build: 'Build', dig: 'Dig', paint: 'Paint', note: 'Note', pan: 'Pan', stamp: 'Place' };
 
 function setText(el, str) {
   if (el.textContent !== str) el.textContent = str;
@@ -400,6 +465,7 @@ function setTool(tool) {
     b.classList.toggle('active', b.dataset.tool === tool);
   }
   canvas.classList.toggle('pan', tool === 'pan');
+  if (gallery) gallery.show(tool === 'stamp');
   invalidate();
 }
 
@@ -467,30 +533,47 @@ function updateStatus() {
 /* ── actions ─────────────────────────────────────────────────────────── */
 
 /**
- * Rotate the view: 0 is the isometric default, 1 looks straight down with the
- * world axes square on screen — the pose where note text reads head-on.
+ * Point the camera: spin is the azimuth in degrees (any angle) and tilt the
+ * elevation, from nearly edge-on to straight down. Straight down with spin 0
+ * puts the world axes square on screen, which is where note writing reads
+ * head-on.
  */
-function setView(k) {
-  cam.tilt = Math.max(0, Math.min(1, Number(k) || 0));
-  cam.view = viewOf(cam.tilt);
-  const input = $('a-tilt');
-  if (input && document.activeElement !== input) input.value = String(Math.round(cam.tilt * 100));
-  const out = $('a-tilt-val');
-  if (out) out.textContent = cam.tilt >= 0.999 ? 'facing' : `${Math.round(cam.tilt * 100)}%`;
+function setView(spin, tilt) {
+  cam.spin = Number.isFinite(+spin) ? +spin : cam.spin;
+  cam.tilt = Number.isFinite(+tilt) ? +tilt : cam.tilt;
+  cam.view = viewOf(cam.spin, cam.tilt);
+  const v = cam.view;
+  const si = $('a-spin');
+  if (si && document.activeElement !== si) si.value = String(Math.round(v.spin));
+  const ti = $('a-tilt');
+  if (ti && document.activeElement !== ti) ti.value = String(Math.round(v.tilt));
+  const so = $('a-spin-val');
+  if (so) so.textContent = `${Math.round(v.spin)}°`;
+  const to = $('a-tilt-val');
+  if (to) to.textContent = `${Math.round(v.tilt)}°`;
   invalidate();
 }
 
+/** Preset: the isometric look, or straight down facing the notes. */
 function toggleView() {
-  setView(cam.tilt > 0.5 ? 0 : 1);
+  const v = cam.view;
+  if (v && v.tilt >= TILT_MAX - 0.5 && v.spin < 0.5) setView(SPIN0, TILT0);
+  else setView(0, TILT_MAX);
 }
 
-/** Restore a saved camera, including its view angle. */
+/** Restore a saved camera, including the angles (and the older single slider). */
 function applyCamera(c) {
   if (!c || !Number.isFinite(c.scale)) return false;
   cam.ox = c.ox;
   cam.oy = c.oy;
   cam.scale = c.scale;
-  setView(Number.isFinite(c.tilt) ? c.tilt : 0);
+  let spin = Number.isFinite(c.spin) ? c.spin : SPIN0;
+  let tilt = Number.isFinite(c.tilt) ? c.tilt : TILT0;
+  if (tilt <= 1) {                    // v2 saves stored the 0..1 blend
+    tilt = TILT0 + (TILT_MAX - TILT0) * Math.max(0, Math.min(1, tilt));
+    spin = SPIN0;
+  }
+  setView(spin, tilt);
   return true;
 }
 
@@ -518,10 +601,13 @@ function buildActions() {
   $('a-zout').addEventListener('click', () => zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, 1 / 1.2));
   $('a-view').addEventListener('click', fitView);
 
+  const spin = $('a-spin');
+  spin.addEventListener('input', () => setView(Number(spin.value), cam.tilt));
+  spin.addEventListener('change', () => requestSave());
   const tilt = $('a-tilt');
-  tilt.addEventListener('input', () => setView(Number(tilt.value) / 100));
+  tilt.addEventListener('input', () => setView(cam.spin, Number(tilt.value)));
   tilt.addEventListener('change', () => requestSave());
-  setView(cam.tilt);
+  setView(cam.spin, cam.tilt);
   $('a-help').addEventListener('click', () => { $('help').hidden = false; });
   $('help-done').addEventListener('click', () => { $('help').hidden = true; });
 
@@ -621,6 +707,7 @@ window.addEventListener('keydown', (e) => {
     case 'p': case 'P': setTool('paint'); return;
     case 'n': case 'N': setTool('note'); return;
     case 'h': case 'H': setTool('pan'); return;
+    case 'm': case 'M': setTool('stamp'); return;
     case 'v': case 'V': toggleView(); return;
     case '[': setBrush(BRUSHES[Math.max(0, BRUSHES.indexOf(state.brush) - 1)]); return;
     case ']': setBrush(BRUSHES[Math.min(BRUSHES.length - 1, BRUSHES.indexOf(state.brush) + 1)]); return;
@@ -657,6 +744,8 @@ window.addEventListener('beforeunload', () => {
 });
 
 /* ── boot ────────────────────────────────────────────────────────────── */
+
+gallery = new Gallery($('gallery'), { onPick: () => setTool('stamp') });
 
 buildToolbar();
 buildActions();

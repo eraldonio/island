@@ -90,7 +90,7 @@ export class Notes {
     this.hooks = hooks;
     this.els = new Map();
     this.rev = -1;
-    this.revK = -1;
+    this.viewKey = -1;
     this.solid = (x, y, z) => world.get(x, y, z) !== undefined;
   }
 
@@ -201,10 +201,11 @@ export class Notes {
   /* ── frame sync ────────────────────────────────────────────────────── */
 
   sync(cam) {
-    const k = (cam.view || ISO).k;
-    if (this.world.rev !== this.rev || k !== this.revK) {
+    const v = cam.view || ISO;
+    const key = v.spin * 1000 + v.tilt;
+    if (this.world.rev !== this.rev || key !== this.viewKey) {
       this.rev = this.world.rev;
-      this.revK = k;
+      this.viewKey = key;
       for (const note of this.world.notes) this.regen(note);
     }
 

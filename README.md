@@ -23,9 +23,10 @@ which browsers refuse to load from the filesystem.
 
 | Action | Input |
 | --- | --- |
-| Apply the current tool | click or drag on the world |
-| Build / dig / paint / note / pan | `B` `D` `P` `N` `H` |
-| Pick a material | `1` … `8` |
+| Apply the current tool | click, or drag — one action per block the cursor moves into (holding still does nothing more) |
+| Build / dig / paint / note / place / pan | `B` `D` `P` `N` `M` `H` |
+| Place a model | `M` (or the place tool) opens the gallery, pick a prefab, then click the world: it rests on that column's surface and takes its own footprint |
+| Pick a material | `1` … `9` |
 | Brush size (1×1, 3×3, 5×5) | `[` `]` |
 | Place a note | the note tool, or `Shift`+click with any tool |
 | Edit a note | click its text (rich text, in place) |
@@ -35,7 +36,8 @@ which browsers refuse to load from the filesystem.
 | Cycle paper colour / delete | `●` / `×` on the note |
 | Pan | `Space`+drag, middle-drag, right-drag, `Shift`+wheel, or the pan tool |
 | Zoom | wheel (at the cursor), `Ctrl`+wheel, `+` / `−`, or pinch on touch |
-| Face the notes | `V`, or drag the view slider: the world rotates from the isometric default to straight down, so note writing reads head-on |
+| Orbit the camera | the `spin` and `tilt` sliders: spin turns the world to any azimuth, tilt raises the camera from nearly edge-on to straight down. Straight down with spin 0 makes note writing read head-on |
+| Face the notes | `V` jumps between the isometric default and that straight-down pose |
 | Centre the view | `0` |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Shift+Z` |
 | Help | `?` |
@@ -45,7 +47,7 @@ what makes the whole renderer cheap.
 
 ## How it works
 
-**Parallel projection with a rotatable view.** Every world point maps to the
+**Parallel projection with a free camera orbit.** Every world point maps to the
 screen with one linear equation (`src/iso.js`):
 
 ```
@@ -53,10 +55,11 @@ screenX = (x cosθ - y sinθ) * H
 screenY = (x sinθ + y cosθ) * D - z * C
 ```
 
-θ is the view azimuth, D/H the ground foreshortening and C the height scale. The
-view slider moves them together from the isometric default (θ=45°, D/H=½,
-C=16 — the classic 2:1 look) to square-on and straight down (θ=0°, D=H, C=0),
-where the world axes lie on the screen axes and a note's writing is neither
+Two sliders drive it. `spin` is the azimuth θ and takes any angle; `tilt` is the
+elevation, which sets the ground foreshortening (D/H = sin tilt) and the height
+scale (C, full at the default elevation, zero looking straight down). The
+default spin 45 / tilt 30 is the classic 2:1 isometric look; spin 0 with tilt 90
+puts the world axes square on the screen, where a note's writing is neither
 sheared nor squashed.
 
 Because the projection is linear at every angle, two things stay true:
@@ -121,9 +124,19 @@ stored. Pasted HTML is passed through a tag/attribute whitelist
 (`sanitizeHtml`) before it ever reaches the model, as is anything loaded from
 disk or `localStorage`.
 
+**Prefab models.** `src/models.js` is a small library of low-poly voxel models
+(tree, pine, bush, house, duck, boat, boulder, cactus, well, campfire, mushroom,
+snowman, ruins) — each just a list of `[x, y, z, mat]` cells with the origin at
+its min corner, so the footprint is derived, never declared. The gallery draws
+each one with the same projection and palette the world uses (a static painter
+shares the renderer's face geometry), and stamping places the whole model as a
+single undoable edit: footprint centred on the clicked column, resting on that
+column's surface, following the face you click exactly like a single block does.
+
 **Undo/redo** is a command stack of edits (`before`/`after` per voxel, or a note
 patch). A drag stroke is grouped into one command via `beginStroke`/`endStroke`,
-so one `Ctrl+Z` undoes a whole sweep of blocks.
+so one `Ctrl+Z` undoes a whole sweep of blocks — and a stroke acts once per
+block the cursor moves into, so holding the button still never stacks a tower.
 
 ## Files
 
@@ -135,6 +148,8 @@ src/world.js    chunked voxel store, notes, undo/redo, palette, starter island
 src/render.js   canvas renderer: culling, painter sort, note tiles, hover ghost
 src/tools.js    what a click does (build/dig/paint footprints per face)
 src/notes.js    note tiles: warped DOM ink, resize handles, proximity hover
+src/models.js   the low-poly prefab library (voxel cells + footprint helpers)
+src/gallery.js  the model panel: cards, live isometric previews, selection
 src/store.js    localStorage autosave, JSON export/import, v1 migration
 src/main.js     wiring: input, camera, shortcuts, editor modal, status
 ```

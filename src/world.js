@@ -12,6 +12,7 @@ export const PALETTE = [
   { id: 5, name: 'Brick', color: '#c05b4d' },
   { id: 6, name: 'Snow', color: '#edf3f8' },
   { id: 7, name: 'Slate', color: '#575f6b' },
+  { id: 8, name: 'Leaf', color: '#4f9e3f' },
 ];
 
 export const PAPER = ['#ffe08a', '#ffc9d6', '#c4e2ff', '#c9f0c0', '#e0ccff', '#f4f1e8'];
