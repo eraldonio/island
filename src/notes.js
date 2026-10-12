@@ -7,7 +7,7 @@
 // (caret, selection, Ctrl+B/I/U) while looking like writing on a sticker.
 
 import { project, raycast, NOTE_U, ISO } from './iso.js';
-import { PAPER, NOTE_MIN, NOTE_MAX } from './world.js';
+import { PAPER, NOTE_MIN, NOTE_MAX, FS_MIN, FS_MAX, FS_DEFAULT, FS_STEP, clampFs } from './world.js';
 
 const ALLOWED = new Set([
   'P', 'BR', 'DIV', 'SPAN', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'DEL',
@@ -21,8 +21,18 @@ const ALLOWED = new Set([
 const SAMPLES = [[0.5, 0.5], [0.06, 0.5], [0.94, 0.5], [0.5, 0.06], [0.5, 0.94]];
 const BURIED_AT = 0.8;
 
-// Preview sizes tried in order; the last one is the floor before clipping.
-const FIT_SIZES = [12.5, 11, 9.5];
+// Preview sizes tried in order: the note's own size first, then a couple of
+// notches down while that still helps, then clipping at a whole line. The ladder
+// never goes above the size the note asked for.
+const FIT_STEPS = [0, -1.5, -3];
+const fitLadder = (base) => {
+  const out = [];
+  for (const d of FIT_STEPS) {
+    const s = Math.min(base, Math.max(FS_MIN, base + d));
+    if (!out.includes(s)) out.push(s);
+  }
+  return out;
+};
 
 // How far outside the paper (in tile-local px) still counts as "on the note".
 // Large enough to bridge the gap to the hover toolbar and the corner handles.
@@ -83,7 +93,7 @@ export function sanitizeHtml(html) {
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 
 export class Notes {
-  /** @param {{cam:Function,pickAt:Function,onGhost:Function,onDrop:Function,onResize:Function,onResizeCommit:Function,onCycleColor:Function,onExpand:Function,onDelete:Function,onTextEdit:Function,onFocusNote:Function}} hooks */
+  /** @param {{cam:Function,pickAt:Function,onGhost:Function,onDrop:Function,onResize:Function,onResizeCommit:Function,onCycleColor:Function,onFontSize:Function,onExpand:Function,onDelete:Function,onTextEdit:Function,onFocusNote:Function}} hooks */
   constructor(layer, world, hooks) {
     this.layer = layer;
     this.world = world;
@@ -220,8 +230,14 @@ export class Notes {
       }
       this.paint(el, note);
       if (el.dataset.dragging !== '1') this.place(el, note, cam);
-      // measure the text only once the sheet has its block size
-      if (!el.dataset.fitted) { el.dataset.fitted = '1'; this.fit(el); }
+      // Measure the text once the sheet has its block size — and again whenever
+      // the note's preview size changes under us.
+      const fs = String(clampFs(note.fs));
+      if (!el.dataset.fitted || el.dataset.fs !== fs) {
+        el.dataset.fitted = '1';
+        el.dataset.fs = fs;
+        this.fit(el);
+      }
     }
 
     for (const [id, el] of this.els) {
@@ -250,23 +266,32 @@ export class Notes {
     const size = el.querySelector('.size');
     const label = `${note.w}×${note.h}`;
     if (size.textContent !== label) size.textContent = label;
+
+    // The size buttons stop at the ends of the range rather than silently
+    // swallowing clicks.
+    const fs = clampFs(note.fs);
+    el.querySelector('.n-fs-down').disabled = fs <= FS_MIN;
+    el.querySelector('.n-fs-up').disabled = fs >= FS_MAX;
+
     el.classList.toggle('buried', !!note.buried);
   }
 
   /**
-   * Smart preview: step the text size down while it still helps, then clip at a
-   * whole line so the tile never shows a half line or a word cut in half.
+   * Smart preview: start from the note's own preview size, step the text down
+   * while it still helps, then clip at a whole line so the tile never shows a
+   * half line or a word cut in half.
    */
   fit(el) {
     const ink = el.querySelector('.ink');
     if (!ink || !ink.clientHeight) return;   // nothing to measure until attached
     ink.style.height = '';
 
+    const note = this.world.note(el.dataset.id);
     let fits = false;
     let lines = 1;
     let lh = 0;
     let pad = 0;
-    for (const size of FIT_SIZES) {
+    for (const size of fitLadder(clampFs(note ? note.fs : FS_DEFAULT))) {
       ink.style.fontSize = size + 'px';
       const cs = getComputedStyle(ink);
       lh = parseFloat(cs.lineHeight) || size * 1.25;
@@ -323,6 +348,8 @@ export class Notes {
       '</div>' +
       '<div class="tools">' +
         '<span class="size"></span>' +
+        '<button class="n-fs n-fs-down" title="Smaller preview text">−</button>' +
+        '<button class="n-fs n-fs-up" title="Larger preview text">+</button>' +
         '<button class="n-grip" title="Drag to move the note">⠿</button>' +
         '<button class="n-color" title="Cycle paper colour">●</button>' +
         '<button class="n-expand" title="Open the big editor">⤢</button>' +
@@ -339,6 +366,12 @@ export class Notes {
       e.stopPropagation();
       this.hooks.onCycleColor(note.id);
     });
+    for (const b of el.querySelectorAll('.n-fs')) {
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.hooks.onFontSize(note.id, b.classList.contains('n-fs-up') ? FS_STEP : -FS_STEP);
+      });
+    }
     el.querySelector('.n-expand').addEventListener('click', (e) => {
       e.stopPropagation();
       this.hooks.onExpand(note.id);

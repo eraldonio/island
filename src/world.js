@@ -258,7 +258,7 @@ export class World {
     return {
       version: 3,
       voxels,
-      notes: this.notes.map((n) => ({ id: n.id, x: n.x, y: n.y, w: n.w, h: n.h, color: n.color, html: n.html })),
+      notes: this.notes.map((n) => ({ id: n.id, x: n.x, y: n.y, w: n.w, h: n.h, color: n.color, fs: n.fs, html: n.html })),
       props: this.props.map((p) => ({ id: p.id, model: p.model, x: p.x, y: p.y, z: p.z })),
     };
   }
@@ -294,10 +294,26 @@ export const NOTE_MIN = 1;
 export const NOTE_MAX = 16;
 export const NOTE_NEW = { w: 6, h: 4 };
 
+// Preview text size, in tile-local px (NOTE_U per block). The default is small
+// on purpose: a tile is a post-it, and the `−`/`+` buttons in its toolbar trade
+// how much fits against how big it reads. The range is deliberately wide — 3 px
+// fits a wall of text on a small tile, 40 px is a single shouted line.
+export const FS_MIN = 3;
+export const FS_MAX = 40;
+export const FS_DEFAULT = 9;
+export const FS_STEP = 1;
+
 const blocks = (v, fallback) => {
   const n = Math.round(Number(v));
   if (!Number.isFinite(n)) return fallback;
   return Math.min(NOTE_MAX, Math.max(NOTE_MIN, n));
+};
+
+/** A note's preview text size, clamped to the range the buttons can reach. */
+export const clampFs = (v) => {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return FS_DEFAULT;
+  return Math.min(FS_MAX, Math.max(FS_MIN, n));
 };
 
 /**
@@ -314,6 +330,7 @@ export function normalizeNote(raw) {
     w: legacy ? 6 : blocks(raw.w, NOTE_NEW.w),
     h: legacy ? 4 : blocks(raw.h, NOTE_NEW.h),
     color: Number(raw.color) | 0,
+    fs: clampFs(raw.fs),
     html: raw.html || '',
   };
 }
@@ -357,6 +374,7 @@ export function seedStarter(world) {
     id: uid(),
     x: 6, y: -2, w: 10, h: 5,
     color: 0,
+    fs: FS_DEFAULT,
     html:
       '<p><b>Welcome.</b> Shift+click to stick a note on any block.</p>' +
       '<p>B build · D dig · P paint · drag a corner to resize.</p>',

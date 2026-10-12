@@ -1,6 +1,6 @@
 // Wiring: camera, input, tools, editor modal, status, autosave.
 
-import { World, PALETTE, PAPER, seedStarter, uid, NOTE_NEW } from './world.js';
+import { World, PALETTE, PAPER, seedStarter, uid, NOTE_NEW, FS_DEFAULT, clampFs } from './world.js';
 import { Renderer } from './render.js';
 import { Notes, sanitizeHtml } from './notes.js';
 import { raycast, unproject, viewOf, ISO, Z_MAX, SPIN0, TILT0, TILT_MAX } from './iso.js';
@@ -51,6 +51,19 @@ const notes = new Notes($('notes-layer'), world, {
     const n = world.note(id);
     if (!n) return;
     world.patchNote(id, { color: (n.color + 1) % PAPER.length });
+    // The paper is drawn on the canvas, so the new colour only shows once a
+    // frame runs — without this the tile keeps the old colour until some other
+    // event (a pointer move off the toolbar, say) happens to repaint.
+    invalidate();
+    requestSave();
+  },
+  onFontSize: (id, delta) => {
+    const n = world.note(id);
+    if (!n) return;
+    const fs = clampFs(clampFs(n.fs) + delta);
+    if (fs === clampFs(n.fs)) return;
+    world.patchNote(id, { fs });
+    invalidate();
     requestSave();
   },
   onExpand: (id) => openEditor(id),
@@ -568,9 +581,13 @@ function createNote(hit) {
     y: hit.y - ((h - 1) >> 1),
     w, h,
     color: 0,
+    fs: FS_DEFAULT,
     html: '<p><br></p>',
   };
   world.addNote(note);
+  // One note at a time is the common case: hand the pointer back to the pan
+  // tool so the next drag moves the world instead of dropping another note.
+  setTool('pan');
   invalidate();
   requestSave();
   requestAnimationFrame(() => notes.beginEdit(note.id));

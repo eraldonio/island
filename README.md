@@ -29,12 +29,13 @@ which browsers refuse to load from the filesystem.
 | Remove a placed model | dig it (undo brings it back) |
 | Pick a material | `1` … `9` |
 | Brush size (1×1, 3×3, 5×5) | `[` `]` |
-| Place a note | the note tool, or `Shift`+click with any tool |
+| Place a note | the note tool, or `Shift`+click with any tool — the tool then switches to pan, so the next drag moves the world instead of dropping another note |
 | Edit a note | click its text (rich text, in place) |
 | Big editor | double-click a note, or its `⤢` button |
 | Resize a note | drag a white corner handle — it snaps to whole blocks |
 | Move a note | drag its `⠿` grip onto another block |
 | Cycle paper colour / delete | `●` / `×` on the note |
+| Preview text size | `−` / `+` on the note, 3…40 px in steps of 1 (per note, small at 9 by default) |
 | Pan | `Space`+drag, right-drag, `Shift`+wheel, or the pan tool |
 | Zoom | wheel (at the cursor), `Ctrl`+wheel, `+` / `−`, or pinch on touch |
 | Orbit the camera | middle-drag, or the `spin` and `tilt` sliders: spin turns the world to any azimuth, tilt raises the camera from nearly edge-on to straight down. Straight down with spin 0 makes note writing read head-on |
@@ -113,6 +114,15 @@ then clips at a whole line — never a half line or a word cut in half. The `w×
 badge turns amber with a `…` when there is more text than the tile shows; the
 pop-up editor always has all of it.
 
+A note's preview size is its own `fs` (3…40 px, small at 9 by default, since a
+tile is a post-it and the world view should read as one): the `−` and `+`
+buttons in the note's toolbar change it, one pixel per click, and the fit ladder
+starts from there — never above it, so a 3 px wall of text stays 3 px. The range
+is wide on purpose: the bottom end packs a lot onto a small tile, the top end
+gives one shouted line. Everything inside the ink — headings, code, quotes — is
+sized in `em`, so the whole preview scales together. The change is a normal note
+patch, so it undoes with `Ctrl+Z` and is saved and exported with the note.
+
 Resizing is affine-exact: the pointer is mapped back through the tile's own
 matrix, so dragging a corner handle sets `w`/`h` in whole blocks (1…16) with no
 rounding drift. Because the toolbar and the corner handles live *outside* the
@@ -183,8 +193,9 @@ island.world.count, island.world.notes, island.cam         // live state
 island.save()                                              // force a save
 ```
 
-A note is `{ id, x, y, w, h, color, html }`: `x,y` is the corner cell of its
-footprint, `w,h` its size in blocks, `html` the sanitised rich text. Older
+A note is `{ id, x, y, w, h, color, fs, html }`: `x,y` is the corner cell of its
+footprint, `w,h` its size in blocks, `fs` the preview text size in tile-local px
+(missing reads as the 9 px default), `html` the sanitised rich text. Older
 saves (which stored a floating pin: a fractional centre plus an explicit `z`)
 are migrated on load to the corner cell plus a default tile size.
 
@@ -204,9 +215,10 @@ frame, so a save only stores which model and where.
 * A placed model claims whole blocks but draws at its own resolution, so a small
   model leaves most of its claimed block empty. Its bounding box is what occludes
   and what a dig removes, not the fine geometry.
-* Text capacity is set by the footprint — roughly two characters per block.
-  Long notes want a bigger tile (drag a corner) or the pop-up editor, which
-  always shows everything.
+* Text capacity is set by the footprint and the preview size — at the default
+  9 px, roughly three characters per block; `−` fits more, `+` less. Long notes
+  want a bigger tile (drag a corner) or the pop-up editor, which always shows
+  everything.
 * Every frame sorts the *visible* voxels and tiles: a scene showing tens of
   thousands of blocks will drop frames while panning. Typical islands and note
   canvases are three orders of magnitude below that.

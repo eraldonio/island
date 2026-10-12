@@ -127,10 +127,12 @@ body {
   cursor: text;
 }
 .note .sheet:focus-within { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 65%, transparent); }
+/* Small by default: the ink size is the note's own `fs`, which fit() applies
+   inline from the fit ladder. */
 .note .ink {
   position: absolute; inset: 0;
   padding: 4px 5px;
-  font-size: 12.5px; line-height: 1.25;
+  font-size: 9px; line-height: 1.25;
   color: #23282e;
   overflow: hidden;
   outline: none; user-select: text;
@@ -166,15 +168,18 @@ body {
   background: transparent; border: 0; border-radius: 5px;
   color: var(--fg); opacity: 0.65; cursor: pointer; font: inherit; font-size: 11px; line-height: 1;
 }
-.note .tools button:hover { opacity: 1; background: var(--hover); }
+.note .tools button:hover:not(:disabled) { opacity: 1; background: var(--hover); }
+.note .tools button:disabled { opacity: 0.25; cursor: default; }
+.note .tools .n-fs { font-size: 13px; }
 .note .tools .n-grip { cursor: grab; font-size: 13px; }
 .note.dragging .tools .n-grip { cursor: grabbing; }
 .note .ink p { margin: 0 0 0.35em; }
 .note .ink > :last-child { margin-bottom: 0; }
-.note .ink h1, .note .ink h2, .note .ink h3 { margin: 0.05em 0 0.25em; font-size: 14px; line-height: 1.2; }
+/* Everything inside the ink scales with the note's own preview size. */
+.note .ink h1, .note .ink h2, .note .ink h3 { margin: 0.05em 0 0.25em; font-size: 1.2em; line-height: 1.2; }
 .note .ink ul, .note .ink ol { margin: 0.2em 0; padding-left: 17px; }
 .note .ink blockquote { margin: 0.25em 0; padding-left: 7px; border-left: 3px solid rgba(0, 0, 0, 0.22); }
-.note .ink pre { margin: 0.25em 0; padding: 5px 7px; background: rgba(0, 0, 0, 0.07); border-radius: 5px; font: 11.5px/1.35 ui-monospace, monospace; white-space: pre-wrap; }
+.note .ink pre { margin: 0.25em 0; padding: 5px 7px; background: rgba(0, 0, 0, 0.07); border-radius: 5px; font: 0.92em/1.35 ui-monospace, monospace; white-space: pre-wrap; }
 .note .ink code { background: rgba(0, 0, 0, 0.08); padding: 0 3px; border-radius: 3px; font-family: ui-monospace, monospace; font-size: 0.94em; }
 .note .ink a { color: #1a5fb4; }
 .note.fresh { animation: fadein 0.18s ease-out; }
