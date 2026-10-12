@@ -25,7 +25,7 @@ which browsers refuse to load from the filesystem.
 | --- | --- |
 | Apply the current tool | click, or drag — one action per block the cursor moves into (holding still does nothing more) |
 | Build / dig / paint / note / place / pan | `B` `D` `P` `N` `M` `H` |
-| Place a model | `M` (or the place tool) opens the gallery, pick a prefab, then click the world: it claims its own whole-block footprint, centred on that column and resting on its surface |
+| Place a model | `M` (or the place tool) opens the gallery — a panel of models that scrolls under the wheel once the list is longer than the screen — pick a prefab, then click the world: it claims its own whole-block footprint, centred on that column and resting on its surface |
 | Remove a placed model | dig it (undo brings it back) |
 | Move a placed model | `G` (or the move tool), then drag it: it keeps its place under the pointer, snaps to whole blocks and rides the surface it lands on — the whole drag is one undo step |
 | Turn a placed model | `R` / `Shift+R` — a quarter turn about the footprint's centre, so a model that is not square across shifts by at most half a block to keep its footprint on the grid |

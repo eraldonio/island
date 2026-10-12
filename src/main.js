@@ -627,11 +627,26 @@ canvas.addEventListener('pointerup', onUp);
 canvas.addEventListener('pointercancel', onUp);
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
+/**
+ * Whether the wheel belongs to something under the cursor rather than to the
+ * camera: a panel that is actually scrollable (the model gallery, once the list
+ * is longer than the screen) keeps its own scrolling, and a modal keeps its own
+ * too. Everything else — the toolbar, the status bar, bare canvas, a note — is a
+ * zoom.
+ */
+function wheelBelongsToPanel(target) {
+  for (let el = target instanceof Element ? target : null; el; el = el.parentElement) {
+    if (el.scrollHeight > el.clientHeight && /(auto|scroll)/.test(getComputedStyle(el).overflowY)) return true;
+  }
+  return false;
+}
+
 // Bound to the window so the wheel works even when the cursor is over a note
 // tile; modals keep their own scrolling. Wheel zooms at the cursor, shift pans,
 // and ctrl+wheel keeps working because trackpad pinch sends it.
 window.addEventListener('wheel', (e) => {
   if (e.target.closest && e.target.closest('.backdrop')) return;
+  if (wheelBelongsToPanel(e.target)) return;
   e.preventDefault();
   const r = canvas.getBoundingClientRect();
   if (e.shiftKey) {
