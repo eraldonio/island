@@ -83,7 +83,9 @@ elevation, which sets the ground foreshortening (D/H = sin tilt) and the height
 scale (C, full at the default elevation, zero looking straight down). The
 default spin 45 / tilt 30 is the classic 2:1 isometric look; spin 0 with tilt 90
 puts the world axes square on the screen, where a note's writing is neither
-sheared nor squashed.
+sheared nor squashed. Heights collapse to nothing at that far end, and at a
+quarter-turn spin one family of risers is edge-on, so terrain is read there from
+the contact shading of its top faces — see **Rendering** below.
 
 Because the projection is linear at every angle, two things stay true:
 
@@ -110,6 +112,18 @@ whose three visible faces are all covered or that fall outside the viewport,
 sort, then draw the top and two camera-facing faces per block with flat
 three-tone shading. Faces are filled *and* stroked with the same colour to seal
 antialiasing seams.
+
+A face's tone says which way it faces, which is enough to read the terrain only
+while that face is on screen at all — and the projection is parallel, so there
+are poses where it is not. At a spin of a quarter turn a whole family of side
+faces is exactly edge-on and projects to a line; looking straight down the
+height scale (`C`) is zero and every riser disappears with it. Either way a hill
+would read as flat colour. So each top face is shaded by its surroundings as
+well — the occlusion level rides in the packed per-voxel mask, above the three
+covered-face bits: the four columns beside the face darken it by how far their
+surface stands above (`occlusion`, `AO_STEPS`), which draws the relief as its
+own contours from any angle. Flat ground has every neighbour level with it and is
+untouched, so the default look is unchanged.
 
 **Notes are flat tiles on the surface.** A note is a `w × h` block footprint —
 a rigid post-it lying on the terrain, not a card floating above it. It is drawn

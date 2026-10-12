@@ -40,6 +40,41 @@ export function toneStep(n) {
 }
 export function toneColor(base, step) { return shade(base, 0.6 + 0.4 * step / TONE_STEPS); }
 
+// Contact shading for a block's top face, the second cue the two painters share.
+// A face's own tone says which way it faces, which is enough only while the
+// camera can see the face at all: the projection is parallel, so at a spin of a
+// quarter turn a whole family of side faces is exactly edge-on — it projects to
+// a line — and looking straight down the height scale goes to zero and every
+// riser vanishes with it. Both are poses where a hill would otherwise read as
+// flat colour. So the *ground* every top face sits on is shaded too: each of the
+// four horizontal neighbours darkens it in proportion to how far its surface
+// stands above, quantised to AO_STEPS like a diffuse tone. Flat ground is
+// untouched (every neighbour level with it), so relief reads as its own
+// contours from any angle — including the ones where nothing stands up.
+export const AO_DEPTH = 2;    // block layers above the face that count as full
+export const AO_STEPS = 4;    // quantised occlusion levels, like TONE_STEPS
+export function aoColor(base, occl) {
+  const k = Math.min(AO_STEPS, Math.max(0, occl));
+  return shade(base, 1 - 0.32 * k / AO_STEPS);
+}
+
+/**
+ * How much the terrain around a column shades its surface, 0 (open ground) to
+ * AO_STEPS (walled in on every side). `topAt` is the surface height of a column;
+ * only the four side neighbours count, and each clamps at AO_DEPTH — a wall ten
+ * blocks high shades a face no more than a two-block step does. So this is four
+ * lookups per *drawn top face*, and a block only draws its top when it is its
+ * column's summit.
+ */
+export function occlusion(topAt, x, y, z) {
+  let o = 0, d;
+  d = topAt(x - 1, y) - z; if (d > 0) o += d < AO_DEPTH ? d : AO_DEPTH;
+  d = topAt(x + 1, y) - z; if (d > 0) o += d < AO_DEPTH ? d : AO_DEPTH;
+  d = topAt(x, y - 1) - z; if (d > 0) o += d < AO_DEPTH ? d : AO_DEPTH;
+  d = topAt(x, y + 1) - z; if (d > 0) o += d < AO_DEPTH ? d : AO_DEPTH;
+  return o > AO_STEPS ? AO_STEPS : o;
+}
+
 /** Packed painter key: depth along the view ray, then insertion index. */
 function depthKey(x, y, z, v, n) {
   const depth = x * v.dx + y * v.dy + z * v.dz;
@@ -160,12 +195,14 @@ export class Renderer {
     this.cam = { ox: 0, oy: 0, scale: 1, spin: 45, tilt: 30, view: ISO };
     this.hover = null;         // { hit, cells, tile, fill, outline, cursor }
     this.colors = PALETTE.map((p) => ({
-      top: p.color,
+      top: Array.from({ length: AO_STEPS + 1 }, (_, k) => aoColor(p.color, k)),
       right: shade(p.color, 0.79),
       left: shade(p.color, 0.6),
       raw: p.color,
     }));
     // Reused per-frame buffers (no allocation while panning).
+    // `masks` is one packed byte per voxel: which of its three faces are
+    // covered, plus its top face's occlusion level above bit 2.
     this.buf = {
       keys: [], kinds: [], notes: [], xs: [], ys: [], zs: [], mats: [], masks: [], ax: [], ay: [],
       // Model faces: one run of screen coords per entry, referenced by fstart/fcount.
@@ -304,6 +341,7 @@ export class Renderer {
     const { ox, oy, scale } = this.cam;
     const W_ = this.w;
     const H_ = this.h;
+    const topAt = (x, y) => world.topAt(x, y);
     let n = 0;
 
     // Bounding box of a box, relative to its origin corner, for culling.
@@ -341,7 +379,12 @@ export class Renderer {
 
         g.xs.push(x); g.ys.push(y); g.zs.push(z);
         g.mats.push(mat);
-        g.masks.push((up ? 1 : 0) | (rt ? 2 : 0) | (lf ? 4 : 0));
+        // The top face carries its contact shading in the mask too: `up`, `rt`,
+        // `lf` in the low three bits, the occlusion level (0…AO_STEPS) above
+        // them. Only a summit draws a top face, so only a summit has to ask the
+        // neighbours anything.
+        g.masks.push((up ? 1 : 0) | (rt ? 2 : 0) | (lf ? 4 : 0)
+          | (up ? 0 : occlusion(topAt, x, y, z) << 3));
         g.ax.push(ax); g.ay.push(ay);
         g.kinds.push(0); g.notes.push(0);
         g.fstart.push(0); g.fcount.push(0); g.fcol.push(0); g.fstep.push(0);
@@ -502,8 +545,9 @@ export class Renderer {
       const col = this.colors[g.mats[k]];
       const f = faceSet(P0, U, V, W, v);
 
-      if (!(m & 1)) {                             // top
-        if (col.top !== style) { ctx.fillStyle = style = col.top; ctx.strokeStyle = style; }
+      if (!(m & 1)) {                             // top, in its contact tone
+        const c = col.top[m >> 3];
+        if (c !== style) { ctx.fillStyle = style = c; ctx.strokeStyle = style; }
         ctx.beginPath();
         polyPath(ctx, f.top);
         ctx.fill(); ctx.stroke();
