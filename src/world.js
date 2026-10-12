@@ -3,6 +3,10 @@
 
 import { CHUNK, Z_MIN, Z_MAX } from './iso.js';
 
+// The materials a block can be. Ids are what a voxel stores, so the first nine
+// keep their places and anything new goes on the end: an old save still reads
+// its own colours, and the models and islands that destructure the palette by
+// position keep the swatches they were authored with.
 export const PALETTE = [
   { id: 0, name: 'Grass', color: '#6cbb4f' },
   { id: 1, name: 'Dirt', color: '#9c6b4a' },
@@ -13,6 +17,10 @@ export const PALETTE = [
   { id: 6, name: 'Snow', color: '#edf3f8' },
   { id: 7, name: 'Slate', color: '#575f6b' },
   { id: 8, name: 'Leaf', color: '#4f9e3f' },
+  { id: 9, name: 'Road', color: '#3d434b' },
+  { id: 10, name: 'Gold', color: '#e7bd42' },
+  { id: 11, name: 'Water', color: '#3f8ed0' },
+  { id: 12, name: 'Glass', color: '#8fd8e6' },
 ];
 
 export const PAPER = ['#ffe08a', '#ffc9d6', '#c4e2ff', '#c9f0c0', '#e0ccff', '#f4f1e8'];
@@ -109,6 +117,14 @@ export class World {
 
   /** Apply a batch of {x,y,z,mat} edits, recording them for undo. */
   apply(list) {
+    const cmd = this._voxelCmd(list);
+    if (!cmd) return 0;
+    this._record(cmd);
+    return cmd.edits.length;
+  }
+
+  /** A batch of {x,y,z,mat} edits as one command, or null when nothing changed. */
+  _voxelCmd(list) {
     const edits = [];
     for (const e of list) {
       const before = this.get(e.x, e.y, e.z);
@@ -118,8 +134,31 @@ export class World {
         edits.push({ x: e.x, y: e.y, z: e.z, before, after });
       }
     }
-    if (edits.length) this._record({ kind: 'voxels', edits });
-    return edits.length;
+    return edits.length ? { kind: 'voxels', edits } : null;
+  }
+
+  /**
+   * Stamp a whole scene — relief, placed models and notes together — as ONE
+   * undoable step. Each part is the shape its own adder takes, so a stamped
+   * island leaves nothing behind that a save, an export or a later edit has to
+   * know about: it is ordinary blocks, ordinary props and ordinary notes.
+   */
+  stamp({ voxels = [], props = [], notes = [] }) {
+    const cmds = [];
+    const vox = this._voxelCmd(voxels);
+    if (vox) cmds.push(vox);
+    for (const p of props) {
+      p.rot = p.rot | 0;
+      this.props.push(p);
+      cmds.push({ kind: 'prop-add', prop: p });
+    }
+    for (const n of notes) {
+      this.notes.push(n);
+      cmds.push({ kind: 'note-add', note: n });
+    }
+    if (!cmds.length) return 0;
+    this._commit(cmds.length === 1 ? cmds[0] : { kind: 'group', cmds });
+    return cmds.length;
   }
 
   /* ── undo / redo ───────────────────────────────────────────────────── */
@@ -168,6 +207,11 @@ export class World {
   _run(cmd, dir) {
     const back = dir === 'undo';
     switch (cmd.kind) {
+      case 'group':
+        // A stamped scene: its parts run in the order they were applied, and
+        // in reverse when they are taken back, so the state is never half-way.
+        for (const sub of back ? [...cmd.cmds].reverse() : cmd.cmds) this._run(sub, dir);
+        break;
       case 'voxels':
         for (const e of cmd.edits) {
           this.set(e.x, e.y, e.z, back ? e.before : e.after);

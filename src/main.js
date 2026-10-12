@@ -4,11 +4,14 @@ import { World, PALETTE, PAPER, CHAT_PAPER, seedStarter, uid, NOTE_NEW, FS_DEFAU
 import { Renderer } from './render.js';
 import { Notes, sanitizeHtml } from './notes.js';
 import { Harnesses, ChatWindow } from './harness.js';
-import { dropSession, dropAllSessions } from './omp.js';
+import { dropSession, dropAllSessions, setHostTools, setHostToolRunner } from './omp.js';
+import { HOST_TOOLS, bindHostTools, runHostTool } from './hosttools.js';
 import { raycast, unproject, viewOf, ISO, Z_MAX, SPIN0, TILT0, TILT_MAX } from './iso.js';
 import { targetsFor, BRUSHES } from './tools.js';
-import { Gallery } from './gallery.js';
+import { Gallery, IslandGallery } from './gallery.js';
+import { islandScene, islandParts } from './islands.js';
 import { MODELS, modelSize } from './models.js';
+import { DEFAULT_BG, applyBackground } from './theme.js';
 import * as store from './store.js';
 
 const MODELS_BY_ID = new Map(MODELS.map((m) => [m.id, m]));
@@ -159,6 +162,23 @@ function deleteChat(id) {
   requestSave();
 }
 
+/**
+ * Take a note off the island the way the note's own `×` does. A harness can ask
+ * for this (island_remove), so the modal editor's copy of the text is dropped
+ * without writing back — the note it belongs to is going away.
+ */
+function deleteNote(id) {
+  if (editing && editing.id === id) {
+    editing = null;
+    $('editor').hidden = true;
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  }
+  notes.setEditing(id, false);
+  world.removeNote(id);
+  invalidate();
+  requestSave();
+}
+
 /* ── picking ─────────────────────────────────────────────────────────── */
 
 // Notes decide their own hover state from the pointer, because their toolbar
@@ -211,6 +231,15 @@ function ghostVisual(hit) {
       outline,
       cursor: null,
     };
+  }
+
+  if (state.tool === 'island') {
+    // The whole footprint the island claims, on the level its base plate lands
+    // on — the same blocks the stamp will take.
+    const t = islandTarget(hit);
+    return t
+      ? { hit, cells: [], tile: { x: t.x, y: t.y, w: t.w, h: t.h, level: t.z }, fill: 'rgba(120,220,255,0.20)', outline, cursor: null }
+      : { hit, cells: [], tile: null, fill: 'rgba(255,255,255,0.22)', outline, cursor: { x: hit.x, y: hit.y, z: hit.z, flat: hit.ground } };
   }
 
   if (state.tool === 'grab') {
@@ -447,6 +476,8 @@ function finishStroke(save) {
 /* ── placed models ───────────────────────────────────────────────────── */
 
 let gallery = null;
+let islandsPanel = null;
+let setViewPanel = () => {};   // assigned in buildActions; Escape closes it
 
 /**
  * The block column a click targets: the neighbour of the face it hit, so a model
@@ -483,6 +514,42 @@ function placeStamp(hit) {
   if (!model) return;
   const t = stampTarget(hit);
   world.addProp({ id: uid(), model: model.id, x: t.x, y: t.y, z: t.z });
+  invalidate();
+  requestSave();
+}
+
+/**
+ * Where the selected island lands: its footprint centred on the block column the
+ * click targets, and its base plate at the level a block placed on that column
+ * would take — the same rule a single model is placed by, so the column under the
+ * cursor is the one that decides the height.
+ */
+function islandTarget(hit) {
+  const island = islandsPanel && islandsPanel.island;
+  if (!island) return null;
+  const scene = islandScene(island);
+  const col = columnTarget(hit);
+  return {
+    col,
+    scene,
+    x: col.x - ((scene.w - 1) >> 1),
+    y: col.y - ((scene.h - 1) >> 1),
+    w: scene.w,
+    h: scene.h,
+    z: world.surfaceUnder(col.x, col.y, 1, 1),
+  };
+}
+
+/**
+ * Stamp the selected island — its relief, the elements standing on it and its
+ * notes — where the click landed. The whole place is one undoable step, and
+ * nothing about it stays special once it is down: it is ordinary blocks, models
+ * and notes, so they can be dug, painted, moved and saved like anything else.
+ */
+function placeIsland(hit) {
+  const t = islandTarget(hit);
+  if (!t) return;
+  world.stamp(islandParts(t.scene, t.col.x, t.col.y, t.z));
   invalidate();
   requestSave();
 }
@@ -671,6 +738,10 @@ canvas.addEventListener('pointerdown', (e) => {
     placeStamp(pickAt(e.clientX, e.clientY));
     return;
   }
+  if (state.tool === 'island') {
+    placeIsland(pickAt(e.clientX, e.clientY));
+    return;
+  }
   if (state.tool === 'grab') {
     startPropDrag(e);
     return;
@@ -838,7 +909,7 @@ function createNote(hit) {
 
 /* ── toolbar / status ────────────────────────────────────────────────── */
 
-const TOOL_LABEL = { build: 'Build', dig: 'Dig', paint: 'Paint', note: 'Note', pan: 'Pan', stamp: 'Place', grab: 'Move', harness: 'Harness' };
+const TOOL_LABEL = { build: 'Build', dig: 'Dig', paint: 'Paint', note: 'Note', pan: 'Pan', stamp: 'Place', island: 'Island', grab: 'Move', harness: 'Harness' };
 
 function setText(el, str) {
   if (el.textContent !== str) el.textContent = str;
@@ -856,6 +927,7 @@ function setTool(tool) {
     hoverProp = null;
   }
   if (gallery) gallery.show(tool === 'stamp');
+  if (islandsPanel) islandsPanel.show(tool === 'island');
   invalidate();
 }
 
@@ -865,6 +937,11 @@ function setMat(i) {
     b.classList.toggle('active', Number(b.dataset.mat) === i);
   }
   invalidate();
+}
+
+/** Step the material through the whole palette — the ones past `9` included. */
+function stepMat(dir) {
+  setMat((state.mat + dir + PALETTE.length) % PALETTE.length);
 }
 
 function setBrush(n) {
@@ -885,7 +962,7 @@ function buildToolbar() {
     const b = document.createElement('button');
     b.className = 'swatch';
     b.dataset.mat = String(i);
-    b.title = `${p.name} (${i + 1})`;
+    b.title = i < 9 ? `${p.name} (${i + 1})` : p.name;
     b.style.background = p.color;
     b.addEventListener('click', () => setMat(i));
     sw.appendChild(b);
@@ -944,6 +1021,8 @@ function setView(spin, tilt) {
   if (so) so.textContent = `${Math.round(v.spin)}°`;
   const to = $('a-tilt-val');
   if (to) to.textContent = `${Math.round(v.tilt)}°`;
+  const face = $('a-face');
+  if (face) face.classList.toggle('active', v.tilt >= TILT_MAX - 0.5 && v.spin < 0.5);
   invalidate();
 }
 
@@ -977,6 +1056,18 @@ function fitView() {
   invalidate();
 }
 
+/**
+ * Repaint the backdrop and keep the choice — the one path the swatch, its reset
+ * and the console share, so what is stored is always what is on screen.
+ */
+function setBackground(hex) {
+  const color = applyBackground(hex);
+  $('a-bg').value = color;
+  store.saveUI({ background: color });
+  invalidate();
+  return color;
+}
+
 function requestSave() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => store.save(world, cam), 500);
@@ -986,6 +1077,7 @@ function closeModals() {
   if (editing) closeEditor();
   if (chatWindow.isOpen) chatWindow.close();
   $('help').hidden = true;
+  setViewPanel(false);
 }
 
 function buildActions() {
@@ -995,6 +1087,26 @@ function buildActions() {
   $('a-zout').addEventListener('click', () => zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, 1 / 1.2));
   $('a-view').addEventListener('click', fitView);
 
+  // The camera angle and the backdrop live in their own panel, opened by the
+  // sliders button; a click anywhere else or Escape puts it away again.
+  const viewPanel = $('viewpanel');
+  const camBtn = $('a-cam');
+  setViewPanel = (open) => {
+    viewPanel.hidden = !open;
+    camBtn.classList.toggle('active', open);
+    camBtn.setAttribute('aria-expanded', String(open));
+  };
+  camBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setViewPanel(viewPanel.hidden);
+  });
+  window.addEventListener('pointerdown', (e) => {
+    if (viewPanel.hidden) return;
+    if (viewPanel.contains(e.target) || camBtn.contains(e.target)) return;
+    setViewPanel(false);
+  }, true);
+  $('a-face').addEventListener('click', toggleView);
+
   const spin = $('a-spin');
   spin.addEventListener('input', () => setView(Number(spin.value), cam.tilt));
   spin.addEventListener('change', () => requestSave());
@@ -1002,6 +1114,16 @@ function buildActions() {
   tilt.addEventListener('input', () => setView(cam.spin, Number(tilt.value)));
   tilt.addEventListener('change', () => requestSave());
   setView(cam.spin, cam.tilt);
+
+  // Background: the sky is a preference rather than part of the world, so it is
+  // stored apart from it and never exported. The preview follows the colour
+  // dialog live; the value is only remembered once it closes.
+  const bg = $('a-bg');
+  const prefs = store.loadUI();
+  bg.value = applyBackground(prefs && prefs.background);
+  bg.addEventListener('input', () => { applyBackground(bg.value); invalidate(); });
+  bg.addEventListener('change', () => setBackground(bg.value));
+  $('a-bg-reset').addEventListener('click', () => setBackground(DEFAULT_BG));
   $('a-help').addEventListener('click', () => { $('help').hidden = false; });
   $('help-done').addEventListener('click', () => { $('help').hidden = true; });
 
@@ -1104,8 +1226,11 @@ window.addEventListener('keydown', (e) => {
     case 'n': case 'N': setTool('note'); return;
     case 'h': case 'H': setTool('pan'); return;
     case 'm': case 'M': setTool('stamp'); return;
+    case 'i': case 'I': setTool('island'); return;
     case 'k': case 'K': setTool('harness'); return;
     case 'g': case 'G': setTool('grab'); return;
+    case 'q': case 'Q': stepMat(-1); return;
+    case 'e': case 'E': stepMat(1); return;
     case 'r': case 'R': {
       // Turn the model under the cursor a quarter turn; Shift turns it back.
       if (!e.repeat) rotatePropAt(pointerAt.x, pointerAt.y, e.shiftKey ? -1 : 1);
@@ -1126,7 +1251,7 @@ window.addEventListener('keydown', (e) => {
     default: break;
   }
 
-  if (e.key >= '1' && e.key <= '8') setMat(Number(e.key) - 1);
+  if (e.key >= '1' && e.key <= '9') setMat(Number(e.key) - 1);
 });
 
 window.addEventListener('keyup', (e) => {
@@ -1149,6 +1274,7 @@ window.addEventListener('beforeunload', () => {
 /* ── boot ────────────────────────────────────────────────────────────── */
 
 gallery = new Gallery($('gallery'), { onPick: () => setTool('stamp') });
+islandsPanel = new IslandGallery($('islands'), { onPick: () => setTool('island') });
 
 buildToolbar();
 buildActions();
@@ -1164,7 +1290,17 @@ if (saved) {
 
 invalidate();
 
+// How a harness tile touches the world. Every omp session the page spawns is
+// handed the tool surface in src/hosttools.js — look, terrain, notes, models,
+// islands, spawning another harness, removing things — and a call runs through
+// the same World methods a click does, so each one is a normal undoable edit.
+// A call that fails (an unknown model id, a missing note) comes back to the
+// model as a tool error instead of changing anything.
+bindHostTools({ world, cam, invalidate, requestSave, removeNote: deleteNote, removeChat: deleteChat });
+setHostTools(HOST_TOOLS);
+setHostToolRunner(runHostTool);
+
 // Scripting hook: every part of the app is reachable from the console, e.g.
 //   island.world.get(0, 0, 0)      island.cam.scale = 2
 //   island.world.apply([{ x: 0, y: 0, z: 5, mat: 2 }])
-window.island = { world, cam, state, renderer, notes, chats, chatWindow, invalidate, save: () => store.save(world, cam) };
+window.island = { world, cam, state, renderer, notes, chats, chatWindow, islands: islandsPanel, invalidate, save: () => store.save(world, cam), theme: { set: setBackground, default: DEFAULT_BG } };

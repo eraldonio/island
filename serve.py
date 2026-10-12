@@ -17,6 +17,11 @@ loopback only, and every mutating request must carry an `X-Island` header: a
 browser cannot set that from another origin without a preflight we never grant,
 which keeps a random web page from driving the harness through your browser.
 
+The island's own tools ride the same bridge: the page registers them with omp's
+`set_host_tools`, each call arrives as a `host_tool_call` frame on this stream,
+and the page answers it with `host_tool_result` on the command endpoint. Nothing
+here interprets them — the world lives in the page.
+
 Set ISLAND_OMP to point at a different binary, ISLAND_OMP_CWD at the directory
 the harness works in (default: this one).
 """
@@ -46,6 +51,23 @@ MAX_BODY = 1 << 20   # largest command we accept from the page
 SSE_PING = 15.0      # seconds of quiet before a comment keeps the stream warm
 
 SID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# A host-tool request is answered by the page that received it. The ring exists
+# so a reconnect can rebuild a transcript, but a page that just arrived must not
+# re-run an old call — that would apply its edit to the island a second time. A
+# reconnect (a Last-Event-ID) does get them: that client still holds the answers
+# it has already given.
+HOST_REQUEST = ("host_tool_call", "host_tool_cancel")
+
+
+def frame_type(line):
+    """The `type` of a stdout frame, or None when it is not one we can read."""
+    if '"host_tool_' not in line:
+        return None
+    try:
+        return json.loads(line).get("type")
+    except ValueError:
+        return None
 
 
 class Harness:
@@ -163,7 +185,11 @@ class Harness:
     def subscribe(self, after):
         q = queue.Queue(maxsize=4096)
         with self.lock:
-            backlog = [e for e in self.buf if after is None or e[0] > after]
+            backlog = [
+                e for e in self.buf
+                if (after is None or e[0] > after)
+                and not (after is None and frame_type(e[1]) in HOST_REQUEST)
+            ]
             self.subs.add(q)
         return q, backlog
 

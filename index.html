@@ -24,11 +24,9 @@
     <button class="tbtn" data-tool="paint" title="Paint — recolour the top blocks (P)">
       <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.8s5.2 5.6 5.2 9.1a5.2 5.2 0 0 1-10.4 0C4.8 8.4 10 2.8 10 2.8z"/></svg>
     </button>
+    <div class="tdiv"></div>
     <button class="tbtn" data-tool="note" title="Note — click to drop a sticky note (N)">
       <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3.5h8.6l3.4 3.4v9.6H4z"/><path d="M12.6 3.5v3.4H16"/><path d="M6.6 10.4h6M6.6 13h4"/></svg>
-    </button>
-    <button class="tbtn" data-tool="pan" title="Pan — drag to move the world (H, or hold Space)">
-      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5v15M2.5 10h15"/><path d="M10 2.5 7.6 5.2M10 2.5l2.4 2.7M10 17.5l-2.4-2.7M10 17.5l2.4-2.7M2.5 10l2.7-2.4M2.5 10l2.7 2.4M17.5 10l-2.7-2.4M17.5 10l-2.7 2.4"/></svg>
     </button>
     <button class="tbtn" data-tool="harness" title="Harness — drop a live omp chat tile on the ground (K)">
       <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4.2" width="14" height="10" rx="2"/><path d="M6.5 7.6h7M6.5 10.6h4"/><path d="M8 16.6h4"/></svg>
@@ -36,8 +34,15 @@
     <button class="tbtn" data-tool="stamp" title="Place a model from the gallery (M)">
       <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.2 15.4 6v6.4L10 15.2 4.6 12.4V6z"/><path d="M4.6 6 10 8.8l5.4-2.8M10 8.8v6.4"/><path d="M6 16.6h8"/></svg>
     </button>
+    <button class="tbtn" data-tool="island" title="Island — stamp a preconfigured island: relief, elements and notes (I)">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.4 13.9c2-2 4.4-3 7.6-3s5.6 1 7.6 3"/><path d="M3 16.6h14"/><path d="M10 10.9V3.6M8.6 3.6h2.8M9.1 6.1h1.8"/></svg>
+    </button>
+    <div class="tdiv"></div>
     <button class="tbtn" data-tool="grab" title="Move a placed model — drag it to another block, R turns it a quarter (G)">
       <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.6v14.8M2.6 10h14.8"/><path d="M10 2.6 7.7 5.2M10 2.6l2.3 2.6M10 17.4l-2.3-2.6M10 17.4l2.3-2.6M2.6 10l2.6-2.3M2.6 10l2.6 2.3M17.4 10l-2.6-2.3M17.4 10l-2.6 2.3"/></svg>
+    </button>
+    <button class="tbtn" data-tool="pan" title="Pan — drag to move the world (H, or hold Space)">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5v15M2.5 10h15"/><path d="M10 2.5 7.6 5.2M10 2.5l2.4 2.7M10 17.5l-2.4-2.7M10 17.5l2.4-2.7M2.5 10l2.7-2.4M2.5 10l2.7 2.4M17.5 10l-2.7-2.4M17.5 10l-2.7 2.4"/></svg>
     </button>
   </div>
   <div class="divider"></div>
@@ -49,39 +54,56 @@
 <!-- ── model gallery ───────────────────────────────────────────────────── -->
 <div id="gallery" class="panel gallery" hidden aria-label="Models"></div>
 
-<!-- ── status ──────────────────────────────────────────────────────────── -->
-<div id="status" class="panel status" aria-live="polite">
-  <span id="st-tool">Build</span>
-  <span class="dot">·</span><span id="st-mat">Grass</span>
-  <span class="dot">·</span><span id="st-brush">1×1</span>
-  <span class="sep"></span><span id="st-pos" class="mono">0, 0 · h 0</span>
-  <span class="sep"></span><span id="st-count" class="mono">0 blocks · 0 notes</span>
-  <span class="sep"></span><span id="st-zoom" class="mono">100%</span>
+<!-- ── island gallery ──────────────────────────────────────────────────── -->
+<div id="islands" class="panel gallery islands" hidden aria-label="Islands"></div>
+
+<!-- ── bottom bar: the world's status on the left, the actions on the right ─ -->
+<div id="bottom" class="bottom">
+  <div id="status" class="panel status" aria-live="polite">
+    <span id="st-tool">Build</span>
+    <span class="dot">·</span><span id="st-mat">Grass</span>
+    <span class="dot">·</span><span id="st-brush">1×1</span>
+    <span class="sep"></span><span id="st-pos" class="mono">0, 0 · h 0</span>
+    <span class="sep"></span><span id="st-count" class="mono">0 blocks · 0 notes</span>
+    <span class="sep"></span><span id="st-zoom" class="mono">100%</span>
+  </div>
+
+  <div id="actions" class="panel actions">
+    <button class="abtn" id="a-undo" title="Undo (Ctrl+Z)">↶</button>
+    <button class="abtn" id="a-redo" title="Redo (Ctrl+Shift+Z)">↷</button>
+    <span class="sep"></span>
+    <button class="abtn" id="a-zout" title="Zoom out (−)">−</button>
+    <button class="abtn" id="a-zin" title="Zoom in (+)">+</button>
+    <button class="abtn" id="a-view" title="Centre view (0)">◎</button>
+    <button class="abtn" id="a-cam" title="View — camera angle and backdrop" aria-haspopup="true" aria-expanded="false" aria-controls="viewpanel">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h5M12 6h5M3 10h9M3 14h3M10 14h7"/><circle cx="10" cy="6" r="1.7"/><circle cx="8" cy="14" r="1.7"/></svg>
+    </button>
+    <span class="sep"></span>
+    <button class="abtn" id="a-export" title="Export world as JSON">⤓</button>
+    <button class="abtn" id="a-import" title="Import world JSON">⤒</button>
+    <button class="abtn" id="a-reset" title="Erase everything and start over">✕</button>
+    <button class="abtn" id="a-help" title="Help (?)">?</button>
+  </div>
 </div>
 
-<!-- ── actions ─────────────────────────────────────────────────────────── -->
-<div id="actions" class="panel actions">
-  <button class="abtn" id="a-undo" title="Undo (Ctrl+Z)">↶</button>
-  <button class="abtn" id="a-redo" title="Redo (Ctrl+Shift+Z)">↷</button>
-  <span class="sep"></span>
-  <button class="abtn" id="a-zout" title="Zoom out (−)">−</button>
-  <button class="abtn" id="a-zin" title="Zoom in (+)">+</button>
-  <button class="abtn" id="a-view" title="Centre view (0)">◎</button>
+<!-- ── view panel: how the world is seen, not what is in it ────────────── -->
+<div id="viewpanel" class="panel viewpanel" hidden aria-label="View">
   <label class="viewctl" title="Spin — turn the world around; any angle works">
     <span class="vlabel">spin</span>
     <input id="a-spin" type="range" min="0" max="360" value="45" step="1" aria-label="View spin" />
     <span id="a-spin-val" class="mono">45°</span>
   </label>
-  <label class="viewctl" title="Tilt — raise the camera from edge-on to straight down (V toggles the preset)">
+  <label class="viewctl" title="Tilt — raise the camera from edge-on to straight down">
     <span class="vlabel">tilt</span>
     <input id="a-tilt" type="range" min="10" max="90" value="30" step="1" aria-label="View tilt" />
     <span id="a-tilt-val" class="mono">30°</span>
   </label>
-  <span class="sep"></span>
-  <button class="abtn" id="a-export" title="Export world as JSON">⤓</button>
-  <button class="abtn" id="a-import" title="Import world JSON">⤒</button>
-  <button class="abtn" id="a-reset" title="Erase everything and start over">✕</button>
-  <button class="abtn" id="a-help" title="Help (?)">?</button>
+  <span class="viewctl" title="Sky — the colour behind the world; the rim gradient and the ground grid's ink follow it">
+    <span class="vlabel">sky</span>
+    <input id="a-bg" type="color" value="#18202a" aria-label="Background colour" />
+    <button class="abtn skyreset" id="a-bg-reset" title="Sky — back to the default colour">↺</button>
+  </span>
+  <button class="abtn wide" id="a-face" title="Face the notes — straight down, so writing reads head-on (V)">Face notes</button>
 </div>
 
 <!-- ── harness chat window ─────────────────────────────────────────────── -->
@@ -152,17 +174,26 @@
         <ul>
           <li><b>Click / drag</b> — apply the current tool; a drag acts once per block
               the cursor moves into, so holding still adds nothing more</li>
-          <li><b>B</b> build · <b>D</b> dig · <b>P</b> paint · <b>N</b> note · <b>K</b> harness · <b>M</b> place a model · <b>G</b> move · <b>H</b> pan</li>
+          <li><b>B</b> build · <b>D</b> dig · <b>P</b> paint · <b>N</b> note · <b>K</b> harness · <b>M</b> place a model · <b>I</b> place an island · <b>G</b> move · <b>H</b> pan</li>
           <li><b>M</b> opens the model gallery: pick a low-poly prefab (tree, house,
-              duck…), then click the world — it claims its own blocks, resting on the
-              surface. Models keep their proportions, so the duck really is smaller
-              than the house. <b>Dig</b> a model to take it away</li>
+              duck, lighthouse, windmill, tent, pier, watchtower, statue, crate, barrel,
+              signpost, lamp, palm, haystack…), then click the world — it claims its own
+              blocks, resting on the surface. Models keep their proportions, so the duck
+              really is smaller than the house. The box at the top of the gallery filters
+              the list by name or by pack. <b>Dig</b> a model to take it away</li>
+          <li><b>I</b> opens the island gallery: pick a whole preconfigured place — its own
+              relief, the models standing on it and its notes — then click the world and
+              the island lands there, centred on the column you clicked and resting on it.
+              Relief, elements and notes are one undo step, and once placed they are
+              ordinary blocks, models and notes you can edit, dig or move</li>
           <li><b>G</b> moves a model you have placed: drag it and it snaps to whole
               blocks, riding the surface it lands on (one undo step per drag).
               <b>R</b> / <b>Shift+R</b> turns the model under the cursor a quarter turn
               about its footprint; one that is not square across shifts by up to half
               a block so it stays on the grid</li>
-          <li><b>1…9</b> — pick a material</li>
+          <li><b>1…9</b> — pick a material, or <b>Q</b> / <b>E</b> to step through the
+              whole palette (the street, treasure, water and glass swatches live past
+              the ninth)</li>
           <li><b>[</b> / <b>]</b> — brush size (1×1, 3×3, 5×5)</li>
           <li><b>Ctrl+Z</b> / <b>Ctrl+Shift+Z</b> — undo / redo (one stroke at a time)</li>
         </ul>
@@ -175,9 +206,12 @@
               the world around, dragging down tilts toward straight down</li>
           <li><b>Wheel</b> — zoom at the cursor · <b>Shift+wheel</b> — pan · pinch on touch</li>
           <li><b>+</b> / <b>−</b> / <b>0</b> — zoom in / out / recentre</li>
-          <li><b>spin</b> / <b>tilt</b> sliders — the same orbit, by exact degrees;
-              straight down, where note writing reads head-on</li>
-          <li><b>V</b> — jump between the isometric look and straight down</li>
+          <li><b>View</b> — the sliders button in the bottom bar opens the camera panel:
+              <b>spin</b> and <b>tilt</b> set the orbit by exact degrees, straight down
+              being where note writing reads head-on; <b>Face notes</b> (or <b>V</b>)
+              jumps between that and the isometric look, and <b>sky</b> sets the colour
+              behind the world, which the ground grid's ink follows (<b>↺</b> restores
+              the default)</li>
         </ul>
       </div>
       <div>

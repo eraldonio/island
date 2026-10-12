@@ -9,7 +9,8 @@
 
 import { Z_MIN, Z_MAX, CHUNK, project, unproject, ISO } from './iso.js';
 import { PALETTE, PAPER, CHAT_PAPER } from './world.js';
-import { MODELS, modelFrames } from './models.js';
+import { MODELS, modelFrames, modelSize } from './models.js';
+import { gridInk } from './theme.js';
 
 const MODELS_BY_ID = new Map(MODELS.map((m) => [m.id, m]));
 
@@ -34,6 +35,14 @@ const LIGHT = (() => {
   const k = Math.hypot(l[0], l[1], l[2]);
   return l.map((c) => c / k);
 })();
+// How much of each edge a block face gives up at a corner: the corner is cut
+// back this fraction of the way along both edges and bridged with a quadratic
+// curve through the original vertex, so every cube reads as a rounded-corner
+// box instead of a hard-edged one. A fraction (not a px radius) keeps the
+// chamfer proportional at every zoom, and both faces meeting along a cube edge
+// retract by the same amount, so the cut is symmetric across that edge.
+export const CORNER = 0.15;
+
 export const TONE_STEPS = 16;
 export function toneStep(n) {
   return Math.round(Math.max(0, n[0] * LIGHT[0] + n[1] * LIGHT[1] + n[2] * LIGHT[2]) * TONE_STEPS);
@@ -117,6 +126,52 @@ function polyPath(ctx, pts) {
   ctx.closePath();
 }
 
+/**
+ * One block face as a path with its four corners cut back by `f` of each edge.
+ * The points arrive in `faceSet` order — p0, p0+A, p0+A+B, p0+B — so the two
+ * edge vectors are p1-p0 and p3-p0 and every point below is one multiply from
+ * one of them: no sqrt, no allocation, and the curve's control points are the
+ * untouched corners themselves, which is what makes the cut a rounding rather
+ * than a bevel. Leaves the path open for `fill()`/`stroke()`; callers that draw
+ * several faces in one pass get separate subpaths, since this moveTo's first.
+ */
+export function facePath(ctx, p, f = CORNER) {
+  const p0 = p[0], p1 = p[1], p2 = p[2], p3 = p[3];
+  const ax = (p1.x - p0.x) * f, ay = (p1.y - p0.y) * f;
+  const bx = (p3.x - p0.x) * f, by = (p3.y - p0.y) * f;
+  ctx.moveTo(p0.x + ax, p0.y + ay);
+  ctx.lineTo(p1.x - ax, p1.y - ay);
+  ctx.quadraticCurveTo(p1.x, p1.y, p1.x + bx, p1.y + by);
+  ctx.lineTo(p2.x - bx, p2.y - by);
+  ctx.quadraticCurveTo(p2.x, p2.y, p2.x - ax, p2.y - ay);
+  ctx.lineTo(p3.x + ax, p3.y + ay);
+  ctx.quadraticCurveTo(p3.x, p3.y, p3.x - bx, p3.y - by);
+  ctx.lineTo(p0.x + bx, p0.y + by);
+  ctx.quadraticCurveTo(p0.x, p0.y, p0.x + ax, p0.y + ay);
+  ctx.closePath();
+}
+
+/**
+ * The same corner cut for a convex outline of any length — the cursor that
+ * traces a block's silhouette, so the outline follows the rounded cube it
+ * points at instead of spiking past its corners. Straight edges between the
+ * cuts, one curve per corner, and each vertex's two cuts are proportional to
+ * the edges either side of it, exactly as in `facePath`.
+ */
+function cutPath(ctx, pts, f = CORNER) {
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    const v = pts[i];
+    const p = pts[(i + n - 1) % n];
+    const q = pts[(i + 1) % n];
+    const ax = v.x + (p.x - v.x) * f, ay = v.y + (p.y - v.y) * f;
+    const bx = v.x + (q.x - v.x) * f, by = v.y + (q.y - v.y) * f;
+    if (i === 0) ctx.moveTo(ax, ay); else ctx.lineTo(ax, ay);
+    ctx.quadraticCurveTo(v.x, v.y, bx, by);
+  }
+  ctx.closePath();
+}
+
 /** The 4 corners of each face of the box whose origin corner is P0. */
 function faceSet(P0, U, V, W, v) {
   const at = (a, b, c) => ({
@@ -184,6 +239,160 @@ export function paintModel(ctx, frame, { x = 0, y = 0, z = 0, view = ISO, scale 
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
+  }
+}
+
+const PALETTE_COLORS = PALETTE.map((p) => p.color);
+
+/**
+ * Painter for a whole scene — relief, the elements standing on it and the notes
+ * lying on it — used for the cards of the preconfigured islands. It gathers
+ * every block face, element face and note quad into one painter order by the
+ * same depth rule the live renderer uses, and draws them far to near. Like
+ * `paintModel` it trades speed for being obviously correct: it runs once per
+ * card, not once per frame, so it can afford to walk everything.
+ */
+export function paintScene(ctx, scene, { view = ISO, w = 104, h = 78, pad = 6 } = {}) {
+  const v = view;
+  const solid = new Set();
+  for (const [x, y, z] of scene.voxels) solid.add(x + ',' + y + ',' + z);
+  const has = (x, y, z) => solid.has(x + ',' + y + ',' + z);
+  const topAt = (x, y) => {
+    for (let z = Z_MAX; z >= Z_MIN; z--) if (has(x, y, z)) return z;
+    return Z_MIN - 1;
+  };
+
+  // Fit: the world bounds of the relief and the elements. A model's mesh lives
+  // inside the whole blocks it claims, so the claimed boxes bound the scene.
+  let x0 = Infinity, y0 = Infinity, z0 = Infinity;
+  let x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+  const see = (x, y, z) => {
+    if (x < x0) x0 = x; if (x > x1) x1 = x;
+    if (y < y0) y0 = y; if (y > y1) y1 = y;
+    if (z < z0) z0 = z; if (z > z1) z1 = z;
+  };
+  for (const [x, y, z] of scene.voxels) { see(x, y, z); see(x + 1, y + 1, z + 1); }
+  for (const p of scene.props) {
+    const model = MODELS_BY_ID.get(p.model);
+    if (!model) continue;                          // as the items loop does: draw what we have
+    const size = modelSize(model, p.rot | 0);
+    see(p.x, p.y, p.z);
+    see(p.x + size.w, p.y + size.h, p.z + size.hz);
+  }
+
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const ax of [x0, x1]) {
+    for (const ay of [y0, y1]) {
+      for (const az of [z0, z1]) {
+        const q = project(ax, ay, az, v);
+        if (q.x < minX) minX = q.x;
+        if (q.x > maxX) maxX = q.x;
+        if (q.y < minY) minY = q.y;
+        if (q.y > maxY) maxY = q.y;
+      }
+    }
+  }
+  const spanX = Math.max(1e-6, maxX - minX);
+  const spanY = Math.max(1e-6, maxY - minY);
+  const scale = Math.min((w - 2 * pad) / spanX, (h - 2 * pad) / spanY);
+  const ox = (w - spanX * scale) / 2 - minX * scale;
+  const oy = (h - spanY * scale) / 2 - minY * scale;
+
+  const { U, V, W } = basisOf(v, scale);
+  const px = (x, y) => ox + (x * v.cos - y * v.sin) * v.H * scale;
+  const py = (x, y, z) => oy + ((x * v.sin + y * v.cos) * v.D - z * v.C) * scale;
+
+  const items = [];
+  for (const [x, y, z, mat] of scene.voxels) {
+    const up = has(x, y, z + 1);
+    const rt = !v.faceX || has(x + v.sx, y, z);
+    const lf = !v.faceY || has(x, y + v.sy, z);
+    if (up && rt && lf) continue;
+    items.push({ d: x * v.dx + y * v.dy + z * v.dz, kind: 0, x, y, z, mat, up, rt, lf });
+  }
+  for (const n of scene.notes) {
+    // A tile rests on the surface — one block above the highest block under it,
+    // which is what World.surfaceUnder() hands the live renderer.
+    let level = Z_MIN - 1;
+    for (let i = 0; i < n.w; i++) {
+      for (let j = 0; j < n.h; j++) level = Math.max(level, topAt(n.x + i, n.y + j) + 1);
+    }
+    items.push({
+      d: (n.x + n.w) * v.dx + (n.y + n.h) * v.dy + level * v.dz,
+      kind: 1, note: n, level,
+    });
+  }
+  for (const p of scene.props) {
+    const model = MODELS_BY_ID.get(p.model);
+    if (!model) continue;
+    const frame = modelFrames(model)[(p.rot | 0) & 3];
+    const o = { x: p.x + frame.offset.x, y: p.y + frame.offset.y, z: p.z };
+    const bx = px(o.x, o.y);
+    const by = py(o.x, o.y, o.z);
+    for (const f of frame.faces) {
+      if (f.n[0] * v.dx + f.n[1] * v.dy + f.n[2] * v.dz <= 0) continue;   // back-face cull
+      items.push({
+        d: (o.x + f.c[0]) * v.dx + (o.y + f.c[1]) * v.dy + (o.z + f.c[2]) * v.dz,
+        kind: 2, f, frame, bx, by,
+      });
+    }
+  }
+  items.sort((a, b) => a.d - b.d);
+
+  ctx.lineWidth = 1;
+  ctx.lineJoin = 'round';
+  for (const it of items) {
+    if (it.kind === 1) {                            // a note lying on the surface
+      const n = it.note;
+      const paper = PAPER[((n.color | 0) % PAPER.length + PAPER.length) % PAPER.length];
+      const a = { x: px(n.x, n.y), y: py(n.x, n.y, it.level) };
+      ctx.fillStyle = paper;
+      ctx.strokeStyle = shade(paper, 0.7);
+      ctx.beginPath();
+      polyPath(ctx, [
+        a,
+        { x: a.x + U.x * n.w, y: a.y + U.y * n.w },
+        { x: a.x + U.x * n.w + V.x * n.h, y: a.y + U.y * n.w + V.y * n.h },
+        { x: a.x + V.x * n.h, y: a.y + V.y * n.h },
+      ]);
+      ctx.fill();
+      ctx.stroke();
+      continue;
+    }
+
+    if (it.kind === 2) {                            // an element's face
+      const c = toneColor(it.f.col, toneStep(it.f.n));
+      ctx.fillStyle = c;
+      ctx.strokeStyle = c;
+      ctx.beginPath();
+      const vs = it.f.v;
+      for (let i = 0; i < vs.length; i++) {
+        const p = it.frame.verts[vs[i]];
+        const sx = it.bx + p[0] * U.x + p[1] * V.x + p[2] * W.x;
+        const sy = it.by + p[0] * U.y + p[1] * V.y + p[2] * W.y;
+        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      continue;
+    }
+
+    const base = PALETTE_COLORS[it.mat] || '#8b929e';
+    const P0 = { x: px(it.x, it.y), y: py(it.x, it.y, it.z) };
+    const f = faceSet(P0, U, V, W, v);
+    const faces = [];
+    if (!it.up) faces.push(['top', aoColor(base, occlusion(topAt, it.x, it.y, it.z))]);
+    if (!it.rt && v.faceX) faces.push(['x', shade(base, v.sx > 0 ? 0.79 : 0.6)]);
+    if (!it.lf && v.faceY) faces.push(['y', shade(base, v.sy > 0 ? 0.6 : 0.79)]);
+    for (const [which, col] of faces) {
+      ctx.fillStyle = col;
+      ctx.strokeStyle = col;
+      ctx.beginPath();
+      facePath(ctx, f[which]);
+      ctx.fill();
+      ctx.stroke();
+    }
   }
 }
 
@@ -300,7 +509,8 @@ export class Renderer {
     const gx1 = (r.cx1 + 1) * CHUNK, gy1 = (r.cy1 + 1) * CHUNK;
 
     ctx.lineWidth = 1;
-    ctx.strokeStyle = 'rgba(255,255,255,0.075)';
+    const ink = gridInk();
+    ctx.strokeStyle = ink.minor;
     ctx.beginPath();
     for (let x = Math.ceil(gx0 / step) * step; x <= gx1; x += step) {
       const a = this.toScreen(x, gy0, Z_MIN);
@@ -316,7 +526,7 @@ export class Renderer {
     }
     ctx.stroke();
 
-    ctx.strokeStyle = 'rgba(255,255,255,0.175)';
+    ctx.strokeStyle = ink.major;
     ctx.beginPath();
     const a = this.toScreen(0, gy0, Z_MIN), b = this.toScreen(0, gy1, Z_MIN);
     ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
@@ -549,21 +759,21 @@ export class Renderer {
         const c = col.top[m >> 3];
         if (c !== style) { ctx.fillStyle = style = c; ctx.strokeStyle = style; }
         ctx.beginPath();
-        polyPath(ctx, f.top);
+        facePath(ctx, f.top);
         ctx.fill(); ctx.stroke();
       }
       if (!(m & 2) && v.faceX) {                  // the visible x face
         const c = v.sx > 0 ? col.right : col.left;
         if (c !== style) { ctx.fillStyle = style = c; ctx.strokeStyle = style; }
         ctx.beginPath();
-        polyPath(ctx, f.x);
+        facePath(ctx, f.x);
         ctx.fill(); ctx.stroke();
       }
       if (!(m & 4) && v.faceY) {                  // the visible y face
         const c = v.sy > 0 ? col.left : col.right;
         if (c !== style) { ctx.fillStyle = style = c; ctx.strokeStyle = style; }
         ctx.beginPath();
-        polyPath(ctx, f.y);
+        facePath(ctx, f.y);
         ctx.fill(); ctx.stroke();
       }
     }
@@ -658,9 +868,9 @@ export class Renderer {
       ctx.beginPath();
       for (const c of hv.cells) {
         const f = faceSet(this.toScreen(c.x, c.y, c.z), U, V, W, v);
-        polyPath(ctx, f.top);
-        if (v.faceX) polyPath(ctx, f.x);
-        if (v.faceY) polyPath(ctx, f.y);
+        facePath(ctx, f.top);
+        if (v.faceX) facePath(ctx, f.x);
+        if (v.faceY) facePath(ctx, f.y);
       }
       ctx.fill();
     }
@@ -679,7 +889,7 @@ export class Renderer {
           { x: P0.x + W.x + V.x, y: P0.y + W.y + V.y },
         ]);
       } else {
-        polyPath(ctx, boxOutline(P0, U, V, W));
+        cutPath(ctx, boxOutline(P0, U, V, W));
       }
       ctx.stroke();
     }

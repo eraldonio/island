@@ -37,12 +37,13 @@ which browsers refuse to load from the filesystem.
 | Action | Input |
 | --- | --- |
 | Apply the current tool | click, or drag — one action per block the cursor moves into (holding still does nothing more) |
-| Build / dig / paint / note / harness / place / move / pan | `B` `D` `P` `N` `K` `M` `G` `H` |
-| Place a model | `M` (or the place tool) opens the gallery — a panel of models that scrolls under the wheel once the list is longer than the screen — pick a prefab, then click the world: it claims its own whole-block footprint, centred on that column and resting on its surface |
+| Build / dig / paint / note / harness / place / island / move / pan | `B` `D` `P` `N` `K` `M` `I` `G` `H` |
+| Place a model | `M` (or the place tool) opens the gallery — a panel of models, grouped by provenance and filtered by the box at its top, that scrolls under the wheel once the list is longer than the screen — pick a prefab, then click the world: it claims its own whole-block footprint, centred on that column and resting on its surface |
 | Remove a placed model | dig it (undo brings it back) |
 | Move a placed model | `G` (or the move tool), then drag it: it keeps its place under the pointer, snaps to whole blocks and rides the surface it lands on — the whole drag is one undo step |
 | Turn a placed model | `R` / `Shift+R` — a quarter turn about the footprint's centre, so a model that is not square across shifts by at most half a block to keep its footprint on the grid |
-| Pick a material | `1` … `9` |
+| Place an island | `I` (or the island tool) opens the island gallery, then click the world: the whole preconfigured place — its relief, the models standing on it and its notes — lands centred on that column, resting on it, in one undo step |
+| Pick a material | `1` … `9`, or `Q` / `E` to step through the whole palette |
 | Brush size (1×1, 3×3, 5×5) | `[` `]` |
 | Place a note | the note tool, or `Shift`+click with any tool — the tool then switches to pan, so the next drag moves the world instead of dropping another note |
 | Edit a note | click its text (rich text, in place) |
@@ -59,8 +60,10 @@ which browsers refuse to load from the filesystem.
 | Harness tile status | the bar across the top of a tile reads the session's own state: `idle` (up, no turns yet), `working` (a turn is running), `done` (it just finished), `waiting for input` (settled — the next move is yours, or it is blocked on a dialog), `error`, `offline` |
 | Pan | `Space`+drag, right-drag, `Shift`+wheel, or the pan tool |
 | Zoom | wheel (at the cursor), `Ctrl`+wheel, `+` / `−`, or pinch on touch |
-| Orbit the camera | middle-drag, or the `spin` and `tilt` sliders: spin turns the world to any azimuth, tilt raises the camera from nearly edge-on to straight down. Straight down with spin 0 makes note writing read head-on |
-| Face the notes | `V` jumps between the isometric default and that straight-down pose |
+| Orbit the camera | middle-drag, or the `spin` / `tilt` sliders behind the **View** button in the bottom bar: spin turns the world to any azimuth, tilt raises the camera from nearly edge-on to straight down. Straight down with spin 0 makes note writing read head-on |
+| Face the notes | `V`, or **Face notes** in the View panel, jumps between the isometric default and that straight-down pose |
+| Background colour | the `sky` swatch in the View panel opens the platform colour dialog for the backdrop behind the world; the rim gradient and the ground grid's hairlines are derived from it, so a light backdrop gets dark hairlines instead of invisible white ones. The `↺` beside it puts the default back |
+| View panel | the sliders button in the bottom bar opens it: the camera angle, the backdrop and the preset, kept out of the way of the tools you use while sculpting |
 | Centre the view | `0` |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Shift+Z` |
 | Help | `?` |
@@ -112,6 +115,20 @@ whose three visible faces are all covered or that fall outside the viewport,
 sort, then draw the top and two camera-facing faces per block with flat
 three-tone shading. Faces are filled *and* stroked with the same colour to seal
 antialiasing seams.
+
+**Every face is drawn with its corners cut back** (`facePath`, `CORNER`): a
+fraction of each edge is given up at each corner and the gap bridged with a
+quadratic curve through the original corner, so a block reads as a rounded-corner
+box rather than three hard-edged quads. A fraction rather than a pixel radius
+keeps the cut proportional at any zoom, and it costs no neighbour lookups: two
+faces meeting along a cube edge retract by the same amount, so the cut is
+symmetric across that edge. The cursor that traces a block's silhouette is cut
+the same way (`cutPath`), so it hugs the cube it points at instead of spiking
+past its corners. The one thing this buys and costs at once: the terrain's outer
+silhouette softens, and where four blocks meet, their four cut corners leave a
+small recess — a groove at every junction of a flat field. It is 15% of an edge,
+so it reads as a seam at normal zoom and only becomes a visible pinprick dot when
+zoomed well in.
 
 A face's tone says which way it faces, which is enough to read the terrain only
 while that face is on screen at all — and the projection is parallel, so there
@@ -213,21 +230,55 @@ couple of notches while that still helps, and clipped at a whole line — the ba
 turns amber with a `…` when there is more than the slab shows. Both are ordinary
 tile patches, so they undo with `Ctrl+Z` and travel in a save.
 
+**Harness tiles can edit the island.** A harness is not a spectator. The page
+declares a tool surface to every session it spawns (`set_host_tools`, over the
+same bridge) and runs each call itself (`src/hosttools.js`), so an agent can read
+the world, shape it and put things in it. A call arrives as a `host_tool_call`
+frame, is applied through the same `World` methods a click uses — so each one is
+one ordinary undoable edit, saved and exported like your own work — and the
+answer goes back as `host_tool_result`. A call that fails (an unknown model id, a
+note that is not there) comes back to the model as a tool error it can correct,
+and nothing changes.
+
+| Tool | What it does |
+| --- | --- |
+| `island_look` | read the world: counts, the camera, every note, tile and model near a point with the ids needed to edit them, plus the materials, models and islands available |
+| `island_blocks` | build, dig or paint over a w×h patch of columns, or one height layer with `z` |
+| `island_note` | create a note, or edit one by id — text, size, paper, preview size |
+| `island_model` | stand a prefab model on a column, or move and turn a placed one |
+| `island_island` | stamp a whole preconfigured island — relief, models and notes — as one step |
+| `island_harness` | drop a new harness tile and send it a first prompt |
+| `island_remove` | remove a note, a model or a harness tile by id |
+
+Every session gets them, so a harness can hand work to a harness: the new tile
+has the same surface and works on the same world, and its answer streams on its
+own slab instead of being reported back. Because the tools are the page's, the
+world they touch is the one you are looking at — the tab has to be open, which is
+also why an edit an agent makes is on the same undo stack as your own.
+
 **Prefab models.** `src/models.js` is a small library of low-poly models (tree,
 pine, bush, house, duck, boat, boulder, cactus, well, campfire, mushroom,
-snowman, ruins). Each is a **polygon mesh** — vertices in block units, faces of
-three or four of them — grown from a handful of faceted primitives (box, ball,
-dome, tube, log, roof, ring) rather than a hand-written vertex list, which keeps
-the shapes readable and the file short. Sizes are proportional on purpose: the
-duck is about one block, the house about four.
+snowman, ruins, fence, lighthouse, windmill, tent, pier, watchtower, statue,
+crate, barrel, signpost, lamp, palm, haystack, tower, office, skyscraper, crane,
+and the animals penguin, bear, lion, camel, elephant and giraffe). Each is
+a **polygon mesh** — vertices in block units, faces of three or four of them —
+grown from a handful of faceted primitives (box, ball, dome, tube, log, roof,
+ring) rather than a hand-written vertex list, which keeps the shapes readable and
+the file short. Sizes are proportional on purpose: the duck is about one block,
+the house about four, the lighthouse about six tall.
 
-`src/models.pack.js` adds ten more, baked from the CC0 **Kenney Nature Kit** by
+`src/models.packs.js` adds thirty-seven more, baked from six CC0 packs by
 `tools/import-pack.mjs` — a one-off converter (OBJ + MTL in, block-unit triangles
 out) rather than a loader, so the app still ships no dependencies and loads no
-model formats at runtime. A face there is one flat colour taken from its
-material, because the renderer has no textures; imported models keep those
-colours rather than the world's palette, so an imported tree stands out against
-the terrain. See `CREDITS.md` for provenance and licence.
+model formats at runtime. That is where most of the animals live: a cow, a horse,
+a llama, sheep, a pig, a pug, a zebra, a cat, a dog, a wolf, an eagle, a fox, a
+chick, a bird, a fish, a piranha and a whale, plus the pirate chest, cannon, skull
+and telescope, and six cars. A face is one flat colour taken from its material,
+because the renderer has no textures; a pack's models keep those colours rather
+than the world's palette, so an imported tree stands out against the terrain, and
+each card names the pack it came from. Where a pack ships its colours in a
+material *name* or in nothing at all, the tool recovers them — see `CREDITS.md`
+for that and for the licences.
 
 The map grid is used only for *placement*: `modelSize(model, rot)` reports how
 many whole blocks a model claims at that quarter turn (`ceil` of the frame's
@@ -251,6 +302,48 @@ model to take it away — and so are a drag (however far it goes) and a quarter
 turn. The gallery draws the same geometry with a static painter that shares the
 renderer's face maths.
 
+**Preconfigured islands.** `src/islands.js` is a library of eight whole places —
+Lighthouse isle, Village green, Snow camp, Desert oasis, Treasure atoll, Zoo
+park, Skyscraper city and Harbour town — from a 19×17 headland to a 41×41 city of
+streets and towers. An island is authored in its own blocks: a height function for
+the relief, a list of elements standing on it and a list of notes lying on it,
+each placed against the surface the relief already has, so an island reads exactly
+like the same thing built by hand. A scene is a pure function of the island and a
+fixed seed, so the card in the gallery and the blocks you get are the same island,
+block for block; the card is that scene drawn by `paintScene`, which gathers
+relief, elements and notes into one painter order by the same depth rule the live
+renderer uses.
+
+Two things give the set its variety. **Form:** an island's outline is a test on a
+column, so it is composed from a few predicates rather than always being a disc —
+a sand spit to walk out along, an ellipse of green with a lane cross, a lumpy
+snowfield, a dune field with a spring in it, a ring with a channel cut through it
+and a cay off its west end, an oval park, a city's square of streets — and noise
+roughens a coastline, so no shore is ever an arc. **Sea:** a coastal island is
+*filled*, its footprint including the water around the land as one layer of
+`Water` at z 0 with the land a block higher. That is what a pier reaches over,
+what a boat and a fish float on, and what makes the silhouette read as an island
+rather than as a floating saucer.
+
+`I` drops one. The gallery lists the islands beside the model list, and a click
+stamps the selected one with its footprint centred on the column the pointer
+targets and its base plate resting on that column — the rule a single model is
+placed by, so on uneven ground its plate digs into the low side and bridges the
+high side, and the hover ghost shows the whole footprint it will cover. The
+relief overwrites whatever was in those cells, undo puts it back.
+
+Eight islands in one file are only affordable because a wrong one is a *number*:
+`node tools/check-islands.mjs` walks every scene and reports an element standing
+off the sand, two of them claiming the same blocks, a note lying on the lagoon, a
+relief block whose material is not a palette id — run it by hand after editing.
+
+`World.stamp` takes relief, elements and notes together and commits them as one
+command, so a whole island is a single `Ctrl+Z` and a single redo. Nothing about
+it stays special once it is down: what lands is ordinary blocks, ordinary props
+and ordinary notes, which is why digging, painting, moving, saving and exporting
+all treat a stamped island like anything else in the world — and why a save never
+has to know a piece of the world arrived as an island.
+
 **Undo/redo** is a command stack of edits (`before`/`after` per voxel, or a note
 patch). A drag stroke is grouped into one command via `beginStroke`/`endStroke`,
 so one `Ctrl+Z` undoes a whole sweep of blocks — and a stroke acts once per
@@ -260,7 +353,7 @@ block the cursor moves into, so holding the button still never stacks a tower.
 
 ```
 index.html      markup: canvas, toolbar, status, editor + chat + help modals
-styles.css      dark UI theme, sticky-note, harness-tile and modal styling
+styles.css      UI theme, sticky-note, harness-tile and modal styling
 serve.py        dev server: static files, plus the omp RPC bridge over SSE
 src/iso.js      projection, ground-plane raycast, constants
 src/world.js    chunked voxel store, notes, harness tiles, undo/redo, palette
@@ -270,18 +363,27 @@ src/tools.js    what a click does (build/dig/paint footprints per face)
 src/notes.js    note tiles: warped DOM ink, resize handles, proximity hover
 src/harness.js  harness tiles and the chat window: same tile maths, live stream
 src/omp.js      the omp session behind one tile: RPC commands + event transcript
+src/hosttools.js  the island tools a harness tile can call, and the edits they make
 src/models.js   the low-poly prefab library (polygon meshes + placement helpers)
-src/models.pack.js  models baked from CC0 packs (generated, do not edit)
-src/gallery.js  the model panel: cards, live isometric previews, selection
+src/models.packs.js  models baked from six CC0 packs (generated, do not edit)
+src/islands.js  the preconfigured islands: relief, elements and notes, stamped whole
+src/gallery.js  the model and island panels: cards, live previews, selection
 src/store.js    localStorage autosave, JSON export/import, migration
+src/theme.js    the backdrop: colour, derived rim gradient, grid ink
 src/main.js     wiring: input, camera, shortcuts, modals, status
-tools/import-pack.mjs  one-off pack converter (run by hand, not at runtime)
+tools/import-pack.mjs   one-off pack converter (run by hand, not at runtime)
+tools/check-islands.mjs design check for the island library (run by hand)
 ```
 
 ## Data, saving, scripting
 
 Everything is saved to `localStorage` (debounced, plus on unload) and can be
 exported/imported as JSON from the bottom-right buttons.
+
+The world lives under `island.world.v1`; the backdrop colour is a preference of
+this browser, so it lives under its own `island.ui.v1` key instead and is
+deliberately left out of an exported world — Reset erases the world and leaves
+the backdrop alone.
 
 For scripting or repair from the browser console, the app exposes itself:
 
@@ -290,8 +392,15 @@ island.world.get(0, 0, 0)                                  // material id or und
 island.world.apply([{ x: 0, y: 0, z: 5, mat: 2 }])         // one undoable edit
 island.world.surfaceUnder(x, y, w, h)                      // height a tile would rest at
 island.world.count, island.world.notes, island.cam         // live state
+island.theme.set('#1b2a3a')                                // backdrop (island.theme.default restores it)
 island.save()                                              // force a save
 ```
+
+A material is a palette id: the world's nine (Grass, Dirt, Stone, Sand, Wood,
+Brick, Snow, Slate, Leaf) keep their ids forever, so an older save reads exactly
+as it did, and the four the newer places need are appended — Road for the city's
+streets, Gold for a hoard, Water for a sea, a pool or a pond, Glass for glazing.
+`1`…`9` pick the first nine and `Q` / `E` step through all thirteen.
 
 A note is `{ id, x, y, w, h, color, fs, html }`: `x,y` is the corner cell of its
 footprint, `w,h` its size in blocks, `fs` the preview text size in tile-local px
@@ -310,6 +419,12 @@ server under `.island/harness/<id>/`. Reach a tile from the console the same way
 `island.chatWindow.open(id)` opens its chat, `island.chats` is the tile layer,
 and `island.world.chats` is the list.
 
+A stamped island has no record of its own: relief, elements and notes are written
+into the world as the ordinary things above, so nothing in a save points back at
+the library. From the console, `island.islands` is the panel and
+`island.islands.island` the selected island; `island.world.stamp(parts)` takes the
+same parts `islandParts` produces, which is how the tool places one.
+
 ## Limits
 
 * The world is bounded to `z = 0…128`; x and y are unbounded.
@@ -322,6 +437,14 @@ and `island.world.chats` is the list.
 * A placed model claims whole blocks but draws its own true shape, so a small
   model leaves most of its claimed blocks empty. Its bounding box is what occludes
   and what a dig removes, not the mesh.
+* A stamped island is rigid in the same way a tile is: it rests on the column you
+  click, so on uneven ground its base plate digs into the low side and bridges the
+  high side rather than following the ground. Its relief overwrites the cells it
+  lands in — one `Ctrl+Z` puts them back.
+* A pack model's colour is flat: one colour per face where the pack coloured its
+  materials, and for a pack that left them unnamed, one colour for the whole
+  model (see `CREDITS.md`). Nothing is textured, so a model reads as its shape and
+  its palette rather than as a painted object.
 * Text capacity is set by the footprint and the preview size — at the default
   9 px, roughly three characters per block; `−` fits more, `+` less. Long notes
   want a bigger tile (drag a corner) or the pop-up editor, which always shows
@@ -334,7 +457,10 @@ and `island.world.chats` is the list.
   world normally and shows the tiles as `harness unavailable`. It runs one long-
   lived `omp` process per tile, rooted in this project, so it can read, run and
   edit files exactly like the terminal harness — that is the point, and it is why
-  the bridge only listens on loopback.
+  the bridge only listens on loopback. Its island tools run in the page, so they
+  need the tab open — the file tools do not. A call in flight is answered by
+  whoever saw it, so a page that reloads mid-call strands it until the turn is
+  stopped.
 * A harness tile shows the *tail* of its conversation (the last few lines that
   fit); open it for the whole transcript. Its text is drawn plain, so markdown
   reads as source there rather than typeset.

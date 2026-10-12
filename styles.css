@@ -44,9 +44,14 @@ body {
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(12px);
 }
-#toolbar { left: 14px; top: 14px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+#toolbar { left: 14px; top: 14px; padding: 8px; display: flex; flex-direction: column; gap: 6px; max-height: calc(100vh - 96px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+#toolbar::-webkit-scrollbar { width: 7px; }
+#toolbar::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--fg) 22%, transparent); background-clip: content-box; border: 2px solid transparent; border-radius: 7px; }
 #toolbar .tools { display: flex; flex-direction: column; gap: 4px; }
 .divider { height: 1px; background: var(--border); margin: 2px 0; }
+/* A hairline between the tool families — sculpt, place, move — so nine similar
+   glyphs read as three short groups instead of one long row. */
+.tdiv { height: 1px; background: var(--border); margin: 4px 3px; }
 
 .tbtn, .abtn, .fbtn {
   display: grid; place-items: center;
@@ -54,6 +59,12 @@ body {
   border: 1px solid transparent; border-radius: 9px;
   cursor: pointer; font: inherit; padding: 0;
 }
+.abtn svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.abtn.wide { width: auto; padding: 0 9px; font-size: 12px; }
+/* A control that cannot be used right now should say so: undo with nothing to
+   undo, stop with nothing running. */
+.abtn:disabled, .tbtn:disabled, .fbtn:disabled { opacity: 0.3; cursor: default; }
+.abtn:disabled:hover, .tbtn:disabled:hover, .fbtn:disabled:hover { background: transparent; }
 .tbtn { width: 38px; height: 34px; }
 .tbtn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
 .tbtn:hover, .abtn:hover, .fbtn:hover { background: var(--hover); }
@@ -71,23 +82,58 @@ body {
 .brush:hover { background: var(--hover); }
 .brush.active { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 
+/* One bar along the bottom: status on the left, actions on the right, in a row
+   that may shrink — so a narrow window truncates the status instead of letting
+   the two panels overlap. */
+.bottom {
+  position: fixed; left: 14px; right: 14px; bottom: 14px;
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 10px;
+  pointer-events: none; z-index: 20;
+}
+.bottom > .panel { position: static; pointer-events: auto; max-width: 100%; }
+
 .status {
-  left: 14px; bottom: 14px; padding: 7px 12px;
+  padding: 7px 12px; min-width: 0;
   display: flex; align-items: center; gap: 7px; color: var(--muted);
 }
 .status #st-tool, .status #st-mat { color: var(--fg); }
 .status .dot, .status .sep { opacity: 0.4; }
 .status .sep { width: 1px; height: 13px; background: var(--border); opacity: 1; }
+/* The block/note tally is the longest segment, so it is the one that gives way
+   first when the bar runs short. */
+.status #st-count { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
-.actions { right: 14px; bottom: 14px; padding: 6px; display: flex; align-items: center; gap: 4px; }
+.actions { padding: 6px; display: flex; align-items: center; gap: 4px; flex: 0 0 auto; flex-wrap: wrap-reverse; justify-content: flex-end; }
 .actions .sep { width: 1px; height: 20px; background: var(--border); margin: 0 3px; }
 .abtn { width: 30px; height: 30px; font-size: 15px; color: var(--fg); }
+
+/* Camera angle and backdrop: rarely touched mid-sculpt, so they sit behind the
+   sliders button rather than taking half the bottom bar. */
+.viewpanel {
+  right: 14px; bottom: 62px; z-index: 25; padding: 9px 11px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.viewpanel[hidden] { display: none; }
+#a-face.active { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 
 /* camera orbit: spin turns the world around, tilt raises the camera */
 .viewctl { display: flex; align-items: center; gap: 5px; padding: 0 2px; }
 .viewctl .vlabel { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 .viewctl input[type="range"] { width: 74px; height: 18px; accent-color: var(--accent); cursor: pointer; }
 .viewctl span.mono { color: var(--muted); font-size: 11px; min-width: 34px; text-align: right; }
+.viewpanel .viewctl .vlabel { width: 30px; }
+.viewpanel .viewctl input[type="range"] { width: 116px; }
+
+/* Background picker: the swatch opens the platform colour dialog, and the
+   arrow next to it puts the stock sky back. */
+#a-bg {
+  width: 30px; height: 22px; padding: 0; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 6px; background: transparent;
+}
+#a-bg::-webkit-color-swatch-wrapper { padding: 1px; }
+#a-bg::-webkit-color-swatch { border: none; border-radius: 5px; }
+#a-bg::-moz-color-swatch { border: none; border-radius: 5px; }
+.skyreset { font-size: 13px; }
 
 /* ── model gallery ───────────────────────────────────────────────────── */
 /* The list outgrew the screen the moment pack models joined it, so the panel
@@ -123,6 +169,31 @@ body {
 }
 .mcard canvas { display: block; width: 62px; height: 62px; }
 .mcard .mname { text-align: center; }
+/* `hidden` must win over the flex display the cards use. */
+.mcard[hidden], .ghead[hidden] { display: none; }
+
+/* A filter box pinned to the top of the panel, then the cards under a heading
+   per provenance — the hand-made models first, then each pack — so fifty-odd
+   cards stay findable without scrolling the lot. */
+.gsearch {
+  grid-column: 1 / -1; position: sticky; top: 0; z-index: 2;
+  margin: -8px -8px 0; padding: 8px 10px;
+  background: #121821; border: 0; border-bottom: 1px solid var(--border);
+  color: var(--fg); font: inherit; font-size: 12px; outline: none;
+}
+.gsearch::placeholder { color: var(--muted); }
+.gsearch::-webkit-search-cancel-button { filter: invert(0.6); }
+.ghead {
+  grid-column: 1 / -1; margin: 5px 2px 0;
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted); opacity: 0.8;
+}
+
+/* The island panel stands beside the model list: one wider card per row, because
+   an island is a wide, flat thing and its name is a sentence. */
+.islands { left: 286px; grid-template-columns: 1fr; }
+.islands .mcard { padding: 5px 3px 6px; }
+.islands .mcard canvas { width: 108px; height: 76px; }
 
 /* ── sticky notes ────────────────────────────────────────────────────── */
 /* A note is a w*h block tile lying on the surface. Its paper quad is drawn by

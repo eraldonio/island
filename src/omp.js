@@ -22,6 +22,19 @@ const DONE_HOLD = 1500;
 // Extension UI methods that expect an answer; the rest are presentation.
 const DIALOG_METHODS = new Set(['select', 'confirm', 'input', 'editor', 'ask', 'cancel']);
 
+// Host tools: the island declares its own tool surface to the harness with
+// `set_host_tools`, and a call comes back as a `host_tool_call` frame that this
+// module runs and answers. main.js binds both halves (see src/hosttools.js), so
+// the transport stays ignorant of the world.
+let hostTools = null;                 // RpcHostToolDefinition[]
+let hostRunner = null;                // (name, args) => Promise<{ content, details? }>
+
+/** Declare the island's tools to every session this module opens. */
+export function setHostTools(defs) { hostTools = defs; }
+
+/** Where a host tool call is executed. */
+export function setHostToolRunner(fn) { hostRunner = fn; }
+
 /** Text of a message or tool result content array. */
 function textOf(content) {
   if (typeof content === 'string') return content;
@@ -85,6 +98,8 @@ export class OmpSession {
     this.failed = false;         // a command failed since the last prompt
     this.pending = null;         // an omp dialog waiting on the user
     this.settleTimer = 0;
+    this.hosts = new Map();      // host tool request id -> the answer already sent
+    this.hostCancelled = new Set();   // host tool requests the harness withdrew
   }
 
   /* ── transport ─────────────────────────────────────────────────────── */
@@ -316,6 +331,9 @@ export class OmpSession {
       this.retryAt = 0;
       if (this.status === 'connecting') this.status = 'ready';
       if (!this.synced) { this.synced = true; this.resync(); this.getState(); }
+      // Every incarnation gets the island's tools: re-sending replaces the set,
+      // so a harness that came back up on this tile has them again.
+      if (hostTools) this.command({ id: `h${++this.seq}`, type: 'set_host_tools', tools: hostTools });
       return this.bump();
     }
     if (t === 'agent_start') {
@@ -341,6 +359,17 @@ export class OmpSession {
       if (this.status === 'streaming') this.status = 'ready';
       for (const e of this.items) if (e.kind === 'assistant') e.streaming = false;
       this.armSettle();
+      return this.bump();
+    }
+    if (t === 'host_tool_call') {
+      this.hostCall(f);
+      return this.bump();
+    }
+    if (t === 'host_tool_cancel') {
+      // The turn was aborted while the call was in flight: remember not to
+      // answer it (omp has already stopped caring).
+      this.hostCancelled.add(f.targetId);
+      if (this.hostCancelled.size > 200) this.hostCancelled.delete(this.hostCancelled.values().next().value);
       return this.bump();
     }
     if (t === 'extension_ui_request') {
@@ -478,6 +507,38 @@ export class OmpSession {
   tool(id, info) {
     if (!id) return;
     this.tools.set(id, Object.assign(this.tools.get(id) || {}, info));
+  }
+
+  /**
+   * Run one host tool call — the island's own tools — and answer it. A call that
+   * was already answered is answered again from the record rather than run a
+   * second time: a bridge reconnect can replay a frame, and re-running an edit
+   * would apply it to the world twice.
+   */
+  async hostCall(f) {
+    const id = f && f.id;
+    if (!id) return;
+    const seen = this.hosts.get(id);
+    if (seen) return this.answerHost(id, seen);
+    let answer;
+    try {
+      if (!hostRunner) throw new Error('the island is not wired to run harness tools');
+      answer = { result: await hostRunner(f.toolName, f.arguments || {}) };
+    } catch (err) {
+      answer = {
+        isError: true,
+        result: { content: [{ type: 'text', text: String((err && err.message) || err) }] },
+      };
+    }
+    this.hosts.set(id, answer);
+    if (this.hosts.size > 200) this.hosts.delete(this.hosts.keys().next().value);
+    this.answerHost(id, answer);
+  }
+
+  /** The frame omp expects: the payload under `result`, the failure flag beside it. */
+  answerHost(id, answer) {
+    if (this.hostCancelled.delete(id)) return;
+    this.command(Object.assign({ type: 'host_tool_result', id }, answer));
   }
 
   /** Replace the transcript with a full history (get_messages). */

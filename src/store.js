@@ -3,6 +3,7 @@
 import { sanitizeHtml } from './notes.js';
 
 const KEY = 'island.world.v1';
+const UI_KEY = 'island.ui.v1';
 
 export function save(world, cam) {
   try {
@@ -32,6 +33,36 @@ export function load() {
 
 export function clear() {
   try { localStorage.removeItem(KEY); } catch { /* ignore */ }
+}
+
+/* ── UI preferences ──────────────────────────────────────────────────── */
+
+/**
+ * Prefered look of the app itself (the sky colour), under its own key: the
+ * world is what gets shared and exported, and where it was drawn is nobody
+ * else's business. Reset erases the world, so it leaves these alone.
+ */
+export function loadUI() {
+  try {
+    const raw = localStorage.getItem(UI_KEY);
+    if (!raw) return null;
+    const ui = JSON.parse(raw);
+    return ui && typeof ui === 'object' ? ui : null;
+  } catch (err) {
+    console.warn('[island] ui prefs load failed', err);
+    return null;
+  }
+}
+
+/** Merge a patch into the stored preferences. */
+export function saveUI(patch) {
+  try {
+    localStorage.setItem(UI_KEY, JSON.stringify({ ...loadUI(), ...patch }));
+    return true;
+  } catch (err) {
+    console.warn('[island] ui prefs save failed', err);
+    return false;
+  }
 }
 
 export function download(world, cam) {
