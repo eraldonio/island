@@ -199,7 +199,7 @@ export class World {
 
   /**
    * A model is placed as a prop: the block column it stands on is snapped to the
-   * grid, while its own geometry stays at the model's sub-block resolution.
+   * grid, while the model keeps its own mesh, centred in the blocks it claims.
    */
   addProp(prop) {
     this.props.push(prop);

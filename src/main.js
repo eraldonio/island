@@ -314,7 +314,8 @@ let gallery = null;
  * Where a stamped model lands: the block column the click targets (the
  * neighbour of a side face, so a model placed against a wall stands beside it),
  * with the model's footprint centred on that column and resting on its surface.
- * The grid decides the placement; the model keeps its own sub-block geometry.
+ * The grid decides the placement; the model keeps its own mesh, centred in the
+ * footprint it claims.
  */
 function stampTarget(hit) {
   const model = gallery && gallery.model;

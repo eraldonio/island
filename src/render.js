@@ -9,7 +9,7 @@
 
 import { Z_MIN, Z_MAX, CHUNK, project, unproject, ISO } from './iso.js';
 import { PALETTE, PAPER } from './world.js';
-import { MODELS, modelSize, modelBoxes } from './models.js';
+import { MODELS, modelSize, modelOrigin } from './models.js';
 
 const MODELS_BY_ID = new Map(MODELS.map((m) => [m.id, m]));
 
@@ -25,6 +25,20 @@ export function shade(hex, f) {
   const b = Math.round((n & 255) * f);
   return `rgb(${r},${g},${b})`;
 }
+
+// A fixed directional light, and the flat-shaded tones both painters use. A
+// face's tone is its normal's diffuse term quantised to TONE_STEPS, so faces at
+// different orientations read as distinct flats even where the colour matches.
+const LIGHT = (() => {
+  const l = [-0.5, -0.6, 0.75];
+  const k = Math.hypot(l[0], l[1], l[2]);
+  return l.map((c) => c / k);
+})();
+export const TONE_STEPS = 16;
+export function toneStep(n) {
+  return Math.round(Math.max(0, n[0] * LIGHT[0] + n[1] * LIGHT[1] + n[2] * LIGHT[2]) * TONE_STEPS);
+}
+export function toneColor(base, step) { return shade(base, 0.6 + 0.4 * step / TONE_STEPS); }
 
 /** Packed painter key: depth along the view ray, then insertion index. */
 function depthKey(x, y, z, v, n) {
@@ -98,42 +112,43 @@ function boxOutline(P0, U, V, W) {
 }
 
 /**
- * Painter for a static list of boxes, used for the gallery thumbnails. The live
- * renderer has its own batched, culled path; this one trades speed for being
- * obviously correct on any small voxel list.
+ * Painter for one model, used for the gallery thumbnails. The live renderer has
+ * its own batched, culled path; this one trades speed for being obviously
+ * correct: it back-face culls, sorts faces far-to-near by centroid depth, and
+ * fills and strokes each face in the same flat tone.
  */
-export function paintBoxes(ctx, boxes, { view, scale, ox, oy, colors, unit = 1 }) {
+export function paintModel(ctx, model, { x = 0, y = 0, z = 0, view = ISO, scale = 1, ox = 0, oy = 0 } = {}) {
+  const o = modelOrigin(model, x, y, z);
   const { U, V, W } = basisOf(view, scale);
-  const order = boxes
-    .map((b) => ({ b, d: b.x * view.dx + b.y * view.dy + b.z * view.dz }))
-    .sort((p, q) => p.d - q.d)
-    .map((p) => p.b);
+  const bx = ox + (o.x * view.cos - o.y * view.sin) * view.H * scale;
+  const by = oy + ((o.x * view.sin + o.y * view.cos) * view.D - o.z * view.C) * scale;
+
+  // Back-face cull, then sort far-to-near by centroid depth along the view ray.
+  const order = [];
+  for (const f of model.faces) {
+    const n = f.n;
+    if (n[0] * view.dx + n[1] * view.dy + n[2] * view.dz <= 0) continue;
+    order.push({ f, d: f.c[0] * view.dx + f.c[1] * view.dy + f.c[2] * view.dz });
+  }
+  order.sort((a, b) => a.d - b.d);
 
   ctx.lineWidth = 1;
   ctx.lineJoin = 'round';
   let style = '';
-  for (const box of order) {
-    // A box may carry its own size (a model's sub-block voxels do).
-    const u = box.u || unit;
-    const UU = u === 1 ? U : { x: U.x * u, y: U.y * u };
-    const VV = u === 1 ? V : { x: V.x * u, y: V.y * u };
-    const WW = u === 1 ? W : { x: W.x * u, y: W.y * u };
-    const P0 = {
-      x: ox + (box.x * view.cos - box.y * view.sin) * view.H * scale,
-      y: oy + ((box.x * view.sin + box.y * view.cos) * view.D - box.z * view.C) * scale,
-    };
-    const f = faceSet(P0, UU, VV, WW, view);
-    const col = colors[box.mat] || colors[0];
-    const faces = [[f.top, col.top]];
-    if (view.faceX) faces.push([f.x, view.sx > 0 ? col.right : col.left]);
-    if (view.faceY) faces.push([f.y, view.sy > 0 ? col.left : col.right]);
-    for (const [pts, c] of faces) {
-      if (c !== style) { ctx.fillStyle = style = c; ctx.strokeStyle = style; }
-      ctx.beginPath();
-      polyPath(ctx, pts);
-      ctx.fill();
-      ctx.stroke();
+  for (const { f } of order) {
+    const c = toneColor(PALETTE[f.mat].color, toneStep(f.n));
+    if (c !== style) { ctx.fillStyle = style = c; ctx.strokeStyle = style; }
+    const vs = f.v;
+    ctx.beginPath();
+    for (let i = 0; i < vs.length; i++) {
+      const p = model.verts[vs[i]];
+      const sx = bx + p[0] * U.x + p[1] * V.x + p[2] * W.x;
+      const sy = by + p[0] * U.y + p[1] * V.y + p[2] * W.y;
+      if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
     }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
   }
 }
 
@@ -151,7 +166,12 @@ export class Renderer {
       raw: p.color,
     }));
     // Reused per-frame buffers (no allocation while panning).
-    this.buf = { keys: [], kinds: [], notes: [], xs: [], ys: [], zs: [], mats: [], masks: [], ax: [], ay: [], scales: [] };
+    this.buf = {
+      keys: [], kinds: [], notes: [], xs: [], ys: [], zs: [], mats: [], masks: [], ax: [], ay: [],
+      // Model faces: one run of screen coords per entry, referenced by fstart/fcount.
+      fx: [], fy: [], fstart: [], fcount: [], fmat: [], fstep: [],
+    };
+    this.tone = PALETTE.map(() => []);   // [mat][step] -> colour string, built lazily
     this.resize();
   }
 
@@ -173,6 +193,14 @@ export class Renderer {
 
   /** Screen-space images of the world x, y and z axes at the current zoom. */
   basis() { return basisOf(this.v, this.cam.scale); }
+
+  /** Cached flat tone for a (palette index, tone step) pair. */
+  toneFor(mat, step) {
+    const row = this.tone[mat];
+    let c = row[step];
+    if (c === undefined) c = row[step] = toneColor(PALETTE[mat].color, step);
+    return c;
+  }
 
   /** World point -> screen px, including pan and zoom. */
   toScreen(x, y, z) {
@@ -266,7 +294,8 @@ export class Renderer {
     g.keys.length = 0; g.kinds.length = 0; g.notes.length = 0;
     g.xs.length = 0; g.ys.length = 0; g.zs.length = 0;
     g.mats.length = 0; g.masks.length = 0; g.ax.length = 0; g.ay.length = 0;
-    g.scales.length = 0;
+    g.fx.length = 0; g.fy.length = 0; g.fstart.length = 0; g.fcount.length = 0;
+    g.fmat.length = 0; g.fstep.length = 0;
 
     const world = this.world;
     const v = this.v;
@@ -312,8 +341,9 @@ export class Renderer {
         g.xs.push(x); g.ys.push(y); g.zs.push(z);
         g.mats.push(mat);
         g.masks.push((up ? 1 : 0) | (rt ? 2 : 0) | (lf ? 4 : 0));
-        g.ax.push(ax); g.ay.push(ay); g.scales.push(1);
+        g.ax.push(ax); g.ay.push(ay);
         g.kinds.push(0); g.notes.push(0);
+        g.fstart.push(0); g.fcount.push(0); g.fmat.push(0); g.fstep.push(0);
         g.keys.push(depthKey(x, y, z, v, n));
         if (++n >= KEY_MASK) break outer;
       }
@@ -338,15 +368,18 @@ export class Renderer {
       g.xs.push(note.x); g.ys.push(note.y); g.zs.push(L);
       g.mats.push(0); g.masks.push(0);
       g.kinds.push(1); g.notes.push(ni);
-      g.ax.push(a.x); g.ay.push(a.y); g.scales.push(1);
+      g.ax.push(a.x); g.ay.push(a.y);
+      g.fstart.push(0); g.fcount.push(0); g.fmat.push(0); g.fstep.push(0);
       g.keys.push(depthKey(note.x + note.w, note.y + note.h, L, v, n));
       if (++n >= KEY_MASK) break;
     }
 
-    // Placed models: expanded into their own sub-block boxes so a block in front
-    // of one covers exactly the part it overlaps. The prop's bounding box is
-    // culled once, then every box gets its own painter key.
+    // Placed models: each face is projected and drawn as its own flat-shaded
+    // polygon, keyed by its centroid so it sorts against the terrain exactly
+    // where it stands. The prop's bounding box is culled once, then every face
+    // gets its own painter key.
     const props = world.props;
+    prop:
     for (let pi = 0; pi < props.length; pi++) {
       const prop = props[pi];
       const model = MODELS_BY_ID.get(prop.model);
@@ -366,15 +399,44 @@ export class Renderer {
       }
       if (maxX < -2 || minX > W_ + 2 || maxY < -2 || minY > H_ + 2) continue;
 
-      for (const box of modelBoxes(model, prop.x, prop.y, prop.z)) {
-        const ax = (box.x * v.cos - box.y * v.sin) * v.H * scale + ox;
-        const ay = ((box.x * v.sin + box.y * v.cos) * v.D - box.z * v.C) * scale + oy;
+      // The prop's screen origin, and the linear coefficients that map a local
+      // vertex offset to screen px. Both are view-constant, so no trig is
+      // recomputed per vertex.
+      const o = modelOrigin(model, prop.x, prop.y, prop.z);
+      const bx = (o.x * v.cos - o.y * v.sin) * v.H * scale + ox;
+      const by = ((o.x * v.sin + o.y * v.cos) * v.D - o.z * v.C) * scale + oy;
+      const verts = model.verts;
+
+      for (const f of model.faces) {
+        const fn = f.n;
+        if (fn[0] * v.dx + fn[1] * v.dy + fn[2] * v.dz <= 0) continue;   // back-face cull
+        const idx = f.v;
+        const cnt = idx.length;
+        const start = g.fx.length;
+        let fMinX = Infinity, fMaxX = -Infinity, fMinY = Infinity, fMaxY = -Infinity;
+        for (let j = 0; j < cnt; j++) {
+          const p = verts[idx[j]];
+          const sx = bx + p[0] * U.x + p[1] * V.x + p[2] * W.x;
+          const sy = by + p[0] * U.y + p[1] * V.y + p[2] * W.y;
+          g.fx.push(sx); g.fy.push(sy);
+          if (sx < fMinX) fMinX = sx;
+          if (sx > fMaxX) fMaxX = sx;
+          if (sy < fMinY) fMinY = sy;
+          if (sy > fMaxY) fMaxY = sy;
+        }
+        if (fMaxX < -2 || fMinX > W_ + 2 || fMaxY < -2 || fMinY > H_ + 2) {
+          g.fx.length = start; g.fy.length = start;   // off-screen: drop the run
+          continue;
+        }
+        const mat = f.mat;
         g.xs.push(0); g.ys.push(0); g.zs.push(0);
-        g.mats.push(box.mat); g.masks.push(0);
-        g.kinds.push(2); g.notes.push(0);
-        g.ax.push(ax); g.ay.push(ay); g.scales.push(box.u);
-        g.keys.push(depthKey(box.x, box.y, box.z, v, n));
-        if (++n >= KEY_MASK) break;
+        g.mats.push(mat); g.masks.push(0);
+        g.kinds.push(3); g.notes.push(0);
+        g.ax.push(0); g.ay.push(0);
+        g.fstart.push(start); g.fcount.push(cnt);
+        g.fmat.push(mat); g.fstep.push(toneStep(fn));
+        g.keys.push(depthKey(o.x + f.c[0], o.y + f.c[1], o.z + f.c[2], v, n));
+        if (++n >= KEY_MASK) break prop;
       }
     }
     g.keys.sort((a, b) => a - b);
@@ -393,18 +455,25 @@ export class Renderer {
     for (let i = 0; i < keys.length; i++) {
       const k = keys[i] & KEY_MASK;
       const kind = g.kinds[k];
-      const P0 = { x: g.ax[k], y: g.ay[k] };
       if (kind === 1) { this.drawNoteTile(ctx, this.world.notes[g.notes[k]], g.zs[k], U, V); continue; }
 
-      // A placed model's boxes are a fraction of a block, so its basis is scaled.
-      const u = kind === 2 ? g.scales[k] : 1;
-      const UU = u === 1 ? U : { x: U.x * u, y: U.y * u };
-      const VV = u === 1 ? V : { x: V.x * u, y: V.y * u };
-      const WW = u === 1 ? W : { x: W.x * u, y: W.y * u };
+      if (kind === 3) {                           // a placed model's face
+        const c = this.toneFor(g.fmat[k], g.fstep[k]);
+        if (c !== style) { ctx.fillStyle = style = c; ctx.strokeStyle = style; }
+        const s = g.fstart[k];
+        const e = s + g.fcount[k];
+        ctx.beginPath();
+        ctx.moveTo(g.fx[s], g.fy[s]);
+        for (let j = s + 1; j < e; j++) ctx.lineTo(g.fx[j], g.fy[j]);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        continue;
+      }
 
+      const P0 = { x: g.ax[k], y: g.ay[k] };
       const m = g.masks[k];
       const col = this.colors[g.mats[k]];
-      const f = faceSet(P0, UU, VV, WW, v);
+      const f = faceSet(P0, U, V, W, v);
 
       if (!(m & 1)) {                             // top
         if (col.top !== style) { ctx.fillStyle = style = col.top; ctx.strokeStyle = style; }

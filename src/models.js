@@ -1,283 +1,501 @@
 // The model library: low-poly objects you can stamp into the world.
 //
-// Every model lives on its own mini-voxel grid — `res` mini-voxels to a map
-// block — and is grown by a small shape function rather than a hand-written voxel
-// list, which keeps the shapes readable and the file short. A model's shape and
-// its voxel size have nothing to do with the map's grid: the grid only decides
-// which whole blocks a model claims when it is placed.
+// Every model is a small polygon mesh — vertices in block units, faces of three
+// or four of them — grown from a handful of faceted primitives (box, ball, dome,
+// tube, log, roof, ring) rather than a hand-written vertex list, which keeps the
+// shapes readable and the file short. A model's own size has nothing to do with
+// the map's grid: the grid only decides which whole blocks a model claims when
+// it is placed, the mesh is centred inside that footprint, and it rests on the
+// surface it stands on. Nothing about the map's voxel size leaks into a shape.
 //
-// Sizes are deliberately proportional, so a scene reads at the right scale: the
-// duck stands about a block tall, the house about four blocks across.
+// Faces are flat-shaded by the renderer from their outward normal (`toneStep` in
+// render.js), so a face is the unit of both shape and colour: the primitives are
+// coarse enough to read as low-poly and round enough to read as cute. Winding is
+// outward — a face whose normal points away from the camera is culled — and
+// every convex primitive orients its own faces away from its own centre, so a
+// primitive's winding cannot be got wrong by hand.
 
-export const RES = 8;      // mini-voxels per map block, for every model
+export const MODELS = [];
 
 const GRASS = 0, DIRT = 1, STONE = 2, SAND = 3, WOOD = 4, BRICK = 5, SNOW = 6, SLATE = 7, LEAF = 8;
 
-/* ── shape helpers ───────────────────────────────────────────────────── */
+/* ── the mesh ────────────────────────────────────────────────────────── */
 
-const put = (out, mx, my, mz, mat) => {
-  if (mx < 0 || my < 0 || mz < 0) return;
-  out.push([mx, my, mz, mat]);
-};
+const r4 = (v) => Math.round(v * 1e4) / 1e4;
 
-/** Axis-aligned box; `shell` keeps only its surface (walls, roofs, hulls). */
-function box(out, x0, y0, z0, x1, y1, z1, mat, shell = false) {
-  for (let mx = x0; mx <= x1; mx++) {
-    for (let my = y0; my <= y1; my++) {
-      for (let mz = z0; mz <= z1; mz++) {
-        if (shell && mx !== x0 && mx !== x1 && my !== y0 && my !== y1 && mz !== z0 && mz !== z1) continue;
-        put(out, mx, my, mz, mat);
+/** Newell normal of a face, or null when the face is degenerate. */
+function normalOf(verts, ids) {
+  let nx = 0, ny = 0, nz = 0;
+  for (let i = 0; i < ids.length; i++) {
+    const a = verts[ids[i]];
+    const b = verts[ids[(i + 1) % ids.length]];
+    nx += (a[1] - b[1]) * (a[2] + b[2]);
+    ny += (a[2] - b[2]) * (a[0] + b[0]);
+    nz += (a[0] - b[0]) * (a[1] + b[1]);
+  }
+  const len = Math.hypot(nx, ny, nz);
+  return len > 1e-9 ? [nx / len, ny / len, nz / len] : null;
+}
+
+class Mesh {
+  constructor() {
+    this.verts = [];
+    this.faces = [];
+    this.seen = new Map();      // rounded position -> vertex index
+  }
+
+  /** Vertex index for a position, reusing the vertex when it already exists. */
+  v(x, y, z) {
+    const key = r4(x) + ',' + r4(y) + ',' + r4(z);
+    let i = this.seen.get(key);
+    if (i === undefined) {
+      i = this.verts.length;
+      this.verts.push([x, y, z]);
+      this.seen.set(key, i);
+    }
+    return i;
+  }
+
+  /**
+   * One face, as vertex indices in outward order. `away` is a point it must
+   * look away from — the primitive's own centre — which flips the winding when
+   * the caller authored it inside out. Omit it for faces that carry their own
+   * order (the inner side of a shell).
+   */
+  face(mat, ids, away) {
+    const n = normalOf(this.verts, ids);
+    if (!n) return;
+    let c = 0, d = 0, e = 0;
+    for (const i of ids) { c += this.verts[i][0]; d += this.verts[i][1]; e += this.verts[i][2]; }
+    c /= ids.length; d /= ids.length; e /= ids.length;
+    if (away && (c - away[0]) * n[0] + (d - away[1]) * n[1] + (e - away[2]) * n[2] < 0) {
+      ids.reverse();
+      n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2];
+    }
+    this.faces.push({ v: ids, mat, n, c: [c, d, e] });
+  }
+
+  /** Face from bare positions: `poly(mat, [x,y,z], [x,y,z], [x,y,z], …)`. */
+  poly(mat, ...pts) { this.face(mat, pts.map((p) => this.v(p[0], p[1], p[2])), null); }
+
+  quad(mat, a, b, c, d, away) { this.face(mat, [this.v(...a), this.v(...b), this.v(...c), this.v(...d)], away); }
+
+  tri(mat, a, b, c, away) { this.face(mat, [this.v(...a), this.v(...b), this.v(...c)], away); }
+
+  /** Mark to hand to `paint`, so a pass touches only the faces added after it. */
+  mark() { return this.faces.length; }
+
+  /** Recolour faces from `from` on, wherever `pick` returns a material id. */
+  paint(from, pick) {
+    for (let i = from; i < this.faces.length; i++) {
+      const mat = pick(this.faces[i], i);
+      if (mat != null) this.faces[i].mat = mat;
+    }
+  }
+}
+
+/* ── primitives ──────────────────────────────────────────────────────── */
+
+/** Box, centred, with full extents `sx sy sz` and a yaw about z. */
+function box(m, mat, cx, cy, cz, sx, sy, sz, yaw = 0) {
+  const ca = Math.cos(yaw), sa = Math.sin(yaw);
+  const at = [];
+  for (const i of [0, 1]) {
+    for (const j of [0, 1]) {
+      for (const k of [0, 1]) {
+        const x = (i - 0.5) * sx, y = (j - 0.5) * sy;
+        at.push([cx + x * ca - y * sa, cy + x * sa + y * ca, cz + (k - 0.5) * sz]);
       }
     }
   }
+  const p = (i, j, k) => at[i * 4 + j * 2 + k];
+  const c = [cx, cy, cz];
+  m.quad(mat, p(0, 0, 0), p(0, 1, 0), p(1, 1, 0), p(1, 0, 0), c);   // bottom
+  m.quad(mat, p(0, 0, 1), p(1, 0, 1), p(1, 1, 1), p(0, 1, 1), c);   // top
+  m.quad(mat, p(0, 0, 0), p(1, 0, 0), p(1, 0, 1), p(0, 0, 1), c);   // -y
+  m.quad(mat, p(1, 1, 0), p(0, 1, 0), p(0, 1, 1), p(1, 1, 1), c);   // +y
+  m.quad(mat, p(0, 1, 0), p(0, 0, 0), p(0, 0, 1), p(0, 1, 1), c);   // -x
+  m.quad(mat, p(1, 0, 0), p(1, 1, 0), p(1, 1, 1), p(1, 0, 1), c);   // +x
 }
 
-/** Ellipsoid blob; `shell` keeps only its surface (foliage, boulders, balls). */
-function blob(out, cx, cy, cz, rx, ry, rz, mat, shell = false) {
-  for (let mx = Math.floor(cx - rx); mx <= Math.ceil(cx + rx); mx++) {
-    for (let my = Math.floor(cy - ry); my <= Math.ceil(cy + ry); my++) {
-      for (let mz = Math.floor(cz - rz); mz <= Math.ceil(cz + rz); mz++) {
-        if (((mx - cx) / rx) ** 2 + ((my - cy) / ry) ** 2 + ((mz - cz) / rz) ** 2 > 1) continue;
-        if (shell) {
-          const inner = ((mx - cx) / (rx - 1)) ** 2 + ((my - cy) / (ry - 1)) ** 2 + ((mz - cz) / (rz - 1)) ** 2;
-          if (inner <= 1) continue;
-        }
-        put(out, mx, my, mz, mat);
-      }
+/** Vertices of an elliptical ring in the xy-plane, one per segment. */
+function ringAt(m, cx, cy, z, rx, ry, seg) {
+  const ids = [];
+  for (let s = 0; s < seg; s++) {
+    const a = (2 * Math.PI * s) / seg;
+    ids.push(m.v(cx + rx * Math.cos(a), cy + ry * Math.sin(a), z));
+  }
+  return ids;
+}
+
+/** Ring of a tube or a log, collapsing to one apex vertex at r = 0. */
+function circle(m, cx, cy, z, r, seg) {
+  return r <= 1e-6 ? [m.v(cx, cy, z)] : ringAt(m, cx, cy, z, r, r, seg);
+}
+
+/**
+ * Faceted ellipsoid: `seg` facets around z, `rings` bands pole to pole. This is
+ * the workhorse for anything round — bodies, heads, clumps, boulders, fruit.
+ */
+function ball(m, mat, cx, cy, cz, rx, ry, rz, seg = 9, rings = 4) {
+  const rows = [];
+  for (let r = 0; r <= rings; r++) {
+    const t = r / rings;
+    const z = cz - rz * Math.cos(Math.PI * t);
+    const rr = Math.sin(Math.PI * t);
+    rows.push(r === 0 || r === rings ? [m.v(cx, cy, z)] : ringAt(m, cx, cy, z, rx * rr, ry * rr, seg));
+  }
+  const c = [cx, cy, cz];
+  for (let r = 0; r < rings; r++) {
+    const lo = rows[r], hi = rows[r + 1];
+    for (let s = 0; s < seg; s++) {
+      const t = (s + 1) % seg;
+      if (r === 0) m.face(mat, [lo[0], hi[t], hi[s]], c);
+      else if (r === rings - 1) m.face(mat, [hi[0], lo[s], lo[t]], c);
+      else m.face(mat, [lo[s], lo[t], hi[t], hi[s]], c);
     }
   }
 }
 
-/** Flat disc, for caps and crowns seen from above. */
-function disc(out, cx, cy, z, r, mat) {
-  for (let mx = Math.floor(cx - r); mx <= Math.ceil(cx + r); mx++) {
-    for (let my = Math.floor(cy - r); my <= Math.ceil(cy + r); my++) {
-      if ((mx - cx) ** 2 + (my - cy) ** 2 > r * r) continue;
-      put(out, mx, my, z, mat);
+/** Upper half of an ellipsoid, closed underneath: a mushroom cap, a lid. */
+function dome(m, mat, cx, cy, cz, rx, ry, rz, seg = 10, rings = 3) {
+  const rows = [];
+  for (let r = 0; r <= rings; r++) {
+    const t = (r / rings) * (Math.PI / 2);
+    const z = cz + rz * Math.sin(t);
+    const rr = Math.cos(t);
+    rows.push(r === rings ? [m.v(cx, cy, z)] : ringAt(m, cx, cy, z, rx * rr, ry * rr, seg));
+  }
+  const c = [cx, cy, cz];
+  for (let r = 0; r < rings; r++) {
+    const lo = rows[r], hi = rows[r + 1];
+    for (let s = 0; s < seg; s++) {
+      const t = (s + 1) % seg;
+      if (r === rings - 1) m.face(mat, [hi[0], lo[s], lo[t]], c);
+      else m.face(mat, [lo[s], lo[t], hi[t], hi[s]], c);
     }
   }
+  m.face(mat, ringAt(m, cx, cy, cz, rx, ry, seg), [cx, cy, cz + 1]);
 }
 
-/** Remove everything inside a box, for doorways and broken walls. */
-function carve(out, x0, y0, z0, x1, y1, z1) {
-  for (let i = out.length - 1; i >= 0; i--) {
-    const [mx, my, mz] = out[i];
-    if (mx >= x0 && mx <= x1 && my >= y0 && my <= y1 && mz >= z0 && mz <= z1) out.splice(i, 1);
+/** Flat elliptical disc; `up` faces +z, otherwise -z (water, hatch, lids). */
+function disc(m, mat, cx, cy, z, rx, ry, seg = 10, up = true) {
+  const ids = [];
+  for (let s = 0; s < seg; s++) {
+    const a = (2 * Math.PI * s) / seg;
+    ids.push(m.v(cx + rx * Math.cos(a), cy + ry * Math.sin(a), z));
   }
+  m.face(mat, ids, [cx, cy, up ? z - 1 : z + 1]);
 }
 
-/** Recolour cells inside a box — moss, embers, patches. */
-function tint(out, x0, y0, z0, x1, y1, z1, mat) {
-  for (const cell of out) {
-    const [mx, my, mz] = cell;
-    if (mx >= x0 && mx <= x1 && my >= y0 && my <= y1 && mz >= z0 && mz <= z1) cell[3] = mat;
+/** Vertical tube: cylinder, frustum, or a cone when `r1` is 0. */
+function tube(m, mat, cx, cy, z0, z1, r0, r1 = r0, seg = 8, capBot = false, capTop = true) {
+  const bot = circle(m, cx, cy, z0, r0, seg);
+  const top = circle(m, cx, cy, z1, r1, seg);
+  const c = [cx, cy, (z0 + z1) / 2];
+  for (let s = 0; s < seg; s++) {
+    const t = (s + 1) % seg;
+    if (top.length === 1) m.face(mat, [bot[s], bot[t], top[0]], c);
+    else if (bot.length === 1) m.face(mat, [bot[0], top[s], top[t]], c);
+    else m.face(mat, [bot[s], bot[t], top[t], top[s]], c);
+  }
+  if (capTop && top.length > 1) m.face(mat, top.slice(), [cx, cy, z1 - 1]);
+  if (capBot && bot.length > 1) m.face(mat, bot.slice(), [cx, cy, z0 + 1]);
+}
+
+/** Horizontal tube between two ground points: a log, or a spike when `r1` is 0. */
+function log(m, mat, x0, y0, x1, y1, z, r0, r1 = r0, seg = 6, capStart = true, capEnd = true) {
+  const dx = x1 - x0, dy = y1 - y0;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = -dy / len, uy = dx / len;          // the ring's radial basis
+  const ring = (x, y, r) => {
+    if (r <= 1e-6) return [m.v(x, y, z)];
+    const ids = [];
+    for (let s = 0; s < seg; s++) {
+      const a = (2 * Math.PI * s) / seg;
+      ids.push(m.v(x + ux * r * Math.cos(a), y + uy * r * Math.cos(a), z + r * Math.sin(a)));
+    }
+    return ids;
+  };
+  const a0 = ring(x0, y0, r0), a1 = ring(x1, y1, r1);
+  const c = [(x0 + x1) / 2, (y0 + y1) / 2, z];
+  for (let s = 0; s < seg; s++) {
+    const t = (s + 1) % seg;
+    if (a1.length === 1) m.face(mat, [a0[s], a0[t], a1[0]], c);
+    else if (a0.length === 1) m.face(mat, [a0[0], a1[s], a1[t]], c);
+    else m.face(mat, [a0[s], a0[t], a1[t], a1[s]], c);
+  }
+  if (capStart && a0.length > 1) m.face(mat, a0.slice(), c);
+  if (capEnd && a1.length > 1) m.face(mat, a1.slice(), c);
+}
+
+/** Gable roof: two slopes and two gable ends, the ridge along x at `cy`. */
+function roof(m, mat, cx, cy, zEave, zRidge, sx, sy) {
+  const x0 = cx - sx / 2, x1 = cx + sx / 2, y0 = cy - sy / 2, y1 = cy + sy / 2;
+  const c = [cx, cy, (zEave + zRidge) / 2];
+  m.quad(mat, [x0, y0, zEave], [x1, y0, zEave], [x1, cy, zRidge], [x0, cy, zRidge], c);
+  m.quad(mat, [x1, y1, zEave], [x0, y1, zEave], [x0, cy, zRidge], [x1, cy, zRidge], c);
+  m.tri(mat, [x0, y0, zEave], [x0, cy, zRidge], [x0, y1, zEave], c);
+  m.tri(mat, [x1, y0, zEave], [x1, y1, zEave], [x1, cy, zRidge], c);
+}
+
+/** Annulus wall with both rims: a well's kerb, a rim of a tub. */
+function ring(m, mat, cx, cy, z0, z1, rOut, rIn, seg = 9) {
+  const o0 = circle(m, cx, cy, z0, rOut, seg), o1 = circle(m, cx, cy, z1, rOut, seg);
+  const i0 = circle(m, cx, cy, z0, rIn, seg), i1 = circle(m, cx, cy, z1, rIn, seg);
+  const c = [cx, cy, (z0 + z1) / 2];
+  for (let s = 0; s < seg; s++) {
+    const t = (s + 1) % seg;
+    m.face(mat, [o0[s], o0[t], o1[t], o1[s]], c);                        // outer, faces out
+    m.face(mat, [i1[s], i1[t], i0[t], i0[s]]);                           // inner, faces the axis
+    m.face(mat, [o1[s], o1[t], i1[t], i1[s]], [cx, cy, z1 - 1]);         // rim up
+    m.face(mat, [i0[s], i0[t], o0[t], o0[s]], [cx, cy, z0 + 1]);         // rim down
   }
 }
 
 /**
- * Drop fully enclosed cells: with the camera always above the horizon they can
- * never be seen, and they are the bulk of the voxel count for solid shapes.
+ * One flat face as a `cols` x `rows` grid, `cell(col, row)` picking a material
+ * per cell. A door or a window has to be real geometry rather than a patch laid
+ * on the wall: a coplanar patch of another colour sorts behind the wall it sits
+ * on (the wall's centroid is nearer the camera than the patch's) and is never
+ * seen, while a grid cell *is* that wall, shaded by its own colour. `away` is a
+ * point the wall must look away from — inside the building — so the four walls
+ * of a box cannot be wound inside out by hand.
  */
-function visible(cells) {
-  const has = new Set(cells.map(([x, y, z]) => x + ',' + y + ',' + z));
-  return cells.filter(([x, y, z]) => (
-    !has.has((x + 1) + ',' + y + ',' + z)
-    || !has.has((x - 1) + ',' + y + ',' + z)
-    || !has.has(x + ',' + (y + 1) + ',' + z)
-    || !has.has(x + ',' + (y - 1) + ',' + z)
-    || !has.has(x + ',' + y + ',' + (z + 1))
-  ));
+function grid(m, mat, a, b, c, d, cols, rows, cell, away) {
+  const at = (u, v) => [
+    a[0] * (1 - u) * (1 - v) + b[0] * u * (1 - v) + c[0] * u * v + d[0] * (1 - u) * v,
+    a[1] * (1 - u) * (1 - v) + b[1] * u * (1 - v) + c[1] * u * v + d[1] * (1 - u) * v,
+    a[2] * (1 - u) * (1 - v) + b[2] * u * (1 - v) + c[2] * u * v + d[2] * (1 - u) * v,
+  ];
+  for (let col = 0; col < cols; col++) {
+    for (let row = 0; row < rows; row++) {
+      m.quad(cell(col, row) ?? mat, at(col / cols, row / rows), at((col + 1) / cols, row / rows),
+        at((col + 1) / cols, (row + 1) / rows), at(col / cols, (row + 1) / rows), away);
+    }
+  }
 }
 
 /* ── the models ──────────────────────────────────────────────────────── */
 
-function duck() {
-  const v = [];
-  blob(v, 3, 3, 2, 3, 2.2, 1.6, SAND);            // body
-  blob(v, 5.4, 3, 4.4, 1.6, 1.5, 1.6, SAND);      // head
-  box(v, 7, 3, 4, 7, 3, 4, BRICK);                // beak
-  tint(v, 6, 2, 4, 7, 4, 5, BRICK);
-  return v;
+function duck(m) {
+  ball(m, SAND, 0.50, 0.50, 0.33, 0.36, 0.31, 0.30, 9, 4);              // body
+  ball(m, SAND, 0.18, 0.50, 0.52, 0.15, 0.13, 0.16, 6, 3);              // tail
+  ball(m, SAND, 0.67, 0.50, 0.64, 0.21, 0.19, 0.19, 8, 3);              // head
+  log(m, BRICK, 0.84, 0.50, 1.02, 0.50, 0.61, 0.09, 0, 6, true, false); // beak
+  ball(m, SLATE, 0.76, 0.42, 0.73, 0.035, 0.035, 0.035, 5, 2);          // eyes
+  ball(m, SLATE, 0.76, 0.58, 0.73, 0.035, 0.035, 0.035, 5, 2);
 }
 
-function mushroom() {
-  const v = [];
-  box(v, 2, 2, 0, 3, 3, 5, SNOW);                 // stem
-  blob(v, 3, 3, 6.2, 3.4, 3.4, 1.9, BRICK);       // cap
-  tint(v, 3, 3, 8, 3, 3, 8, SNOW);                // spots
-  tint(v, 1, 1, 7, 1, 1, 7, SNOW);
-  tint(v, 5, 5, 7, 5, 5, 7, SNOW);
-  return v;
+function mushroom(m) {
+  tube(m, SNOW, 0.50, 0.50, 0.0, 0.46, 0.15, 0.11, 8, false, false);    // stem
+  const cap = m.mark();
+  dome(m, BRICK, 0.50, 0.50, 0.44, 0.46, 0.46, 0.32, 11, 3);            // cap
+  m.paint(cap, (f, i) => (i % 3 === 0 ? SNOW : null));                  // spots
 }
 
-function bush() {
-  const v = [];
-  box(v, 3, 3, 0, 4, 4, 1, WOOD);                 // stub trunk
-  blob(v, 3.5, 3.5, 3.4, 3.6, 3.6, 3.2, LEAF);
-  return v;
+function bush(m) {
+  tube(m, WOOD, 0.50, 0.50, 0.0, 0.34, 0.11, 0.09, 6, false, true);     // stub trunk
+  ball(m, LEAF, 0.50, 0.50, 0.56, 0.38, 0.38, 0.36, 9, 4);              // clumps
+  ball(m, LEAF, 0.26, 0.42, 0.44, 0.26, 0.26, 0.24, 7, 3);
+  ball(m, LEAF, 0.74, 0.60, 0.42, 0.24, 0.24, 0.22, 7, 3);
+  ball(m, LEAF, 0.52, 0.44, 0.78, 0.20, 0.20, 0.18, 6, 3);
 }
 
-function campfire() {
-  const v = [];
-  blob(v, 3.5, 3.5, 0.5, 3.4, 3.4, 1, STONE, true);   // ring of stones
-  box(v, 1, 3, 1, 6, 4, 1, WOOD);                     // crossed logs
-  box(v, 3, 1, 1, 4, 6, 1, WOOD);
-  tint(v, 3, 3, 1, 4, 4, 1, BRICK);                   // embers
-  return v;
-}
-
-function boulder() {
-  const v = [];
-  blob(v, 4.5, 4, 2.6, 4.5, 4, 3, STONE);
-  tint(v, 1, 2, 5, 6, 6, 6, GRASS);                   // moss on top
-  return v;
-}
-
-function snowman() {
-  const v = [];
-  blob(v, 3.5, 3.5, 3.5, 3.5, 3.5, 3.5, SNOW);
-  blob(v, 3.5, 3.5, 8.4, 2.6, 2.6, 2.6, SNOW);
-  blob(v, 3.5, 3.5, 11.9, 1.9, 1.9, 1.9, SNOW);
-  box(v, 5, 3, 11, 6, 3, 11, BRICK);                  // nose
-  tint(v, 2, 1, 12, 5, 1, 13, SLATE);                 // eyes
-  tint(v, 3, 3, 5, 4, 4, 5, SLATE);                   // buttons
-  tint(v, 3, 3, 9, 4, 4, 9, SLATE);
-  return v;
-}
-
-function cactus() {
-  const v = [];
-  box(v, 3, 3, 0, 6, 6, 15, LEAF);                    // trunk
-  box(v, 7, 3, 7, 8, 6, 10, LEAF);                    // right arm
-  box(v, 7, 4, 10, 8, 5, 12, LEAF);
-  box(v, 1, 3, 5, 2, 6, 8, LEAF);                     // left arm
-  box(v, 1, 4, 8, 2, 5, 10, LEAF);
-  tint(v, 3, 3, 16, 6, 6, 17, LEAF);                  // rounded top
-  tint(v, 3, 3, 0, 6, 6, 0, SAND);                    // sandy base
-  return v;
-}
-
-function well() {
-  const v = [];
-  blob(v, 5, 5, 1.6, 5, 5, 2.2, STONE, true);         // low stone wall
-  disc(v, 5, 5, 1, 3.6, SLATE);                       // water
-  box(v, 0, 0, 2, 1, 1, 8, WOOD);                     // posts
-  box(v, 9, 9, 2, 10, 10, 8, WOOD);
-  box(v, 0, 0, 8, 10, 1, 9, WOOD);                    // beam
-  return v;
-}
-
-function boat() {
-  const v = [];
-  blob(v, 9.5, 3.5, 2, 9.5, 3.5, 2.2, WOOD, true);    // hull
-  box(v, 9, 3, 3, 10, 4, 8, WOOD);                    // mast
-  box(v, 5, 3, 4, 14, 4, 6, SNOW, true);              // sail
-  return v;
-}
-
-function fence() {
-  const v = [];
-  box(v, 0, 1, 3, 21, 1, 3, WOOD);                    // rails
-  box(v, 0, 1, 5, 21, 1, 5, WOOD);
-  for (const x of [0, 7, 14, 21]) box(v, x, 1, 1, x, 2, 6, WOOD);   // posts
-  return v;
-}
-
-function ruins() {
-  const v = [];
-  box(v, 0, 0, 0, 1, 11, 8, STONE);                   // tall broken wall
-  carve(v, 0, 9, 6, 1, 11, 8);
-  box(v, 0, 0, 0, 9, 1, 5, STONE);                    // return wall
-  carve(v, 6, 0, 0, 9, 1, 2);
-  box(v, 12, 12, 0, 14, 14, 11, STONE, true);         // column
-  carve(v, 12, 12, 10, 14, 14, 11);
-  box(v, 4, 12, 0, 6, 14, 1, STONE);                  // rubble
-  tint(v, 0, 0, 8, 14, 14, 8, LEAF);                  // moss where it is flat
-  return v;
-}
-
-function tree() {
-  const v = [];
-  box(v, 4, 4, 0, 5, 5, 11, WOOD);                    // trunk
-  blob(v, 4.5, 4.5, 15, 4.9, 4.9, 4.4, LEAF, true);
-  blob(v, 6, 3, 12.5, 2.6, 2.6, 2, LEAF);
-  return v;
-}
-
-function pine() {
-  const v = [];
-  box(v, 4, 4, 0, 5, 5, 9, WOOD);                     // trunk
-  blob(v, 4.5, 4.5, 9, 4.6, 4.6, 2.6, LEAF);
-  blob(v, 4.5, 4.5, 14, 3.6, 3.6, 2.4, LEAF);
-  blob(v, 4.5, 4.5, 19, 2.7, 2.7, 2.2, LEAF);
-  blob(v, 4.5, 4.5, 24, 1.8, 1.8, 2, LEAF);
-  blob(v, 4.5, 4.5, 27.5, 1, 1, 1.4, LEAF);
-  return v;
-}
-
-function house() {
-  const v = [];
-  box(v, 0, 0, 0, 15, 12, 6, BRICK, true);            // walls
-  box(v, 0, 0, 7, 15, 12, 7, SLATE);                  // roof
-  carve(v, 6, 0, 0, 9, 0, 4);                         // doorway
-  carve(v, 2, 0, 2, 4, 0, 3);                         // windows
-  carve(v, 11, 0, 2, 13, 0, 3);
-  return v;
-}
-
-export const MODELS = [
-  { id: 'duck', name: 'Duck', res: RES, voxels: visible(duck()) },
-  { id: 'mushroom', name: 'Mushroom', res: RES, voxels: visible(mushroom()) },
-  { id: 'bush', name: 'Bush', res: RES, voxels: visible(bush()) },
-  { id: 'campfire', name: 'Campfire', res: RES, voxels: visible(campfire()) },
-  { id: 'boulder', name: 'Boulder', res: RES, voxels: visible(boulder()) },
-  { id: 'snowman', name: 'Snowman', res: RES, voxels: visible(snowman()) },
-  { id: 'cactus', name: 'Cactus', res: RES, voxels: visible(cactus()) },
-  { id: 'well', name: 'Well', res: RES, voxels: visible(well()) },
-  { id: 'boat', name: 'Boat', res: RES, voxels: visible(boat()) },
-  { id: 'fence', name: 'Fence', res: RES, voxels: visible(fence()) },
-  { id: 'ruins', name: 'Ruins', res: RES, voxels: visible(ruins()) },
-  { id: 'tree', name: 'Tree', res: RES, voxels: visible(tree()) },
-  { id: 'pine', name: 'Pine', res: RES, voxels: visible(pine()) },
-  // The house covers enough ground that an eighth-of-a-block voxel would cost
-  // thousands of boxes; at a quarter of a block it reads the same and stays lean.
-  { id: 'house', name: 'House', res: 4, voxels: visible(house()) },
-];
-
-/**
- * How many whole blocks a model claims, plus its own mini-voxel extent.
- * The grid is the placement's business, not the model's.
- */
-export function modelSize(model) {
-  let w = 1, h = 1, hz = 1;
-  for (const [mx, my, mz] of model.voxels) {
-    if (mx + 1 > w) w = mx + 1;
-    if (my + 1 > h) h = my + 1;
-    if (mz + 1 > hz) hz = mz + 1;
+function campfire(m) {
+  for (let s = 0; s < 5; s++) {                                         // ring of cobbles
+    const a = (2 * Math.PI * (s + 0.5)) / 5;
+    ball(m, STONE, 0.50 + 0.35 * Math.cos(a), 0.50 + 0.35 * Math.sin(a), 0.10, 0.13, 0.12, 0.11, 5, 3);
   }
-  const res = model.res;
-  return {
-    w: Math.ceil(w / res),
-    h: Math.ceil(h / res),
-    hz: Math.ceil(hz / res),
-    mini: { w, h, hz },
-  };
+  for (let s = 0; s < 3; s++) {                                         // crossed logs
+    const a = (Math.PI * s) / 3;
+    log(m, WOOD, 0.50 - 0.36 * Math.cos(a), 0.50 - 0.36 * Math.sin(a),
+      0.50 + 0.36 * Math.cos(a), 0.50 + 0.36 * Math.sin(a), 0.13, 0.065, 0.065, 6);
+  }
+  const flame = m.mark();
+  tube(m, BRICK, 0.50, 0.50, 0.16, 0.54, 0.15, 0, 6, false, false);     // flame
+  m.paint(flame, (f) => (f.c[2] > 0.24 ? SAND : null));                 // hot tip
+}
+
+function boulder(m) {
+  const rock = m.mark();
+  ball(m, STONE, 0.50, 0.50, 0.36, 0.46, 0.42, 0.38, 8, 4);
+  ball(m, STONE, 0.24, 0.62, 0.22, 0.22, 0.20, 0.20, 6, 3);
+  ball(m, STONE, 0.74, 0.30, 0.20, 0.19, 0.17, 0.17, 6, 3);
+  m.paint(rock, (f) => (f.n[2] > 0.75 ? GRASS : null));                 // moss on top
+}
+
+function snowman(m) {
+  ball(m, SNOW, 0.50, 0.50, 0.42, 0.42, 0.42, 0.40, 9, 4);              // base
+  ball(m, SNOW, 0.50, 0.50, 1.02, 0.31, 0.31, 0.30, 7, 3);              // middle
+  ball(m, SNOW, 0.50, 0.50, 1.48, 0.25, 0.25, 0.24, 7, 3);              // head
+  log(m, BRICK, 0.71, 0.50, 0.94, 0.50, 1.46, 0.07, 0, 5, true, false); // nose
+  ball(m, SLATE, 0.66, 0.41, 1.58, 0.04, 0.04, 0.04, 4, 2);             // eyes
+  ball(m, SLATE, 0.66, 0.59, 1.58, 0.04, 0.04, 0.04, 4, 2);
+  ball(m, SLATE, 0.80, 0.50, 1.00, 0.05, 0.05, 0.05, 4, 2);             // buttons
+  ball(m, SLATE, 0.79, 0.50, 1.19, 0.05, 0.05, 0.05, 4, 2);
+}
+
+function cactus(m) {
+  tube(m, LEAF, 0.50, 0.50, 0.0, 1.88, 0.21, 0.19, 8, false, true);     // trunk
+  ball(m, LEAF, 0.50, 0.50, 1.90, 0.19, 0.19, 0.17, 7, 3);              // crown
+  log(m, LEAF, 0.50, 0.50, 1.02, 0.50, 1.12, 0.15, 0.15, 6, true, false);  // right arm out
+  tube(m, LEAF, 1.02, 0.50, 1.12, 1.58, 0.15, 0.14, 6, true, true);     // …and up
+  ball(m, LEAF, 1.02, 0.50, 1.60, 0.14, 0.14, 0.13, 6, 3);
+  log(m, LEAF, 0.50, 0.50, -0.02, 0.50, 1.32, 0.14, 0.14, 6, true, false); // left arm out
+  tube(m, LEAF, -0.02, 0.50, 1.32, 1.72, 0.14, 0.13, 6, true, true);    // …and up
+  ball(m, LEAF, -0.02, 0.50, 1.74, 0.13, 0.13, 0.12, 6, 3);
+}
+
+function well(m) {
+  ring(m, STONE, 0.50, 0.50, 0.0, 0.36, 0.62, 0.44, 9);                 // kerb
+  disc(m, SLATE, 0.50, 0.50, 0.28, 0.43, 0.43, 9, true);                // water
+  box(m, WOOD, 0.10, 0.50, 0.68, 0.10, 0.10, 0.68);                     // posts
+  box(m, WOOD, 0.90, 0.50, 0.68, 0.10, 0.10, 0.68);
+  box(m, WOOD, 0.50, 0.50, 0.98, 1.00, 0.09, 0.09);                     // beam
+  box(m, SLATE, 0.50, 0.50, 0.86, 0.16, 0.16, 0.17);                    // bucket
+  roof(m, SLATE, 0.50, 0.50, 1.03, 1.45, 1.10, 0.80);                   // little roof
+}
+
+function boat(m) {
+  const zF = 0.10, zR = 0.46;
+  const out = [[0.00, 0.50], [0.55, 0.06], [2.05, 0.06], [2.60, 0.50], [2.05, 0.94], [0.55, 0.94]];
+  const c = [1.30, 0.50, (zF + zR) / 2];
+  for (let s = 0; s < out.length; s++) {                                // hull shell
+    const a = out[s], b = out[(s + 1) % out.length];
+    m.quad(WOOD, [a[0], a[1], zF], [b[0], b[1], zF], [b[0], b[1], zR], [a[0], a[1], zR], c);
+  }
+  m.poly(WOOD, ...out.map((p) => [p[0], p[1], zR]));                    // deck
+  m.poly(SLATE, ...out.map((p) => [1.30 + (p[0] - 1.30) * 0.78, 0.50 + (p[1] - 0.50) * 0.78, zR + 0.014]));  // hatch
+  tube(m, WOOD, 1.20, 0.50, 0.44, 1.32, 0.05, 0.045, 5, false, true);   // mast
+  const sail = [[1.18, 0.50, 1.29], [1.18, 0.50, 0.50], [2.10, 0.50, 0.50]];
+  m.tri(SNOW, ...sail);                                                 // sail, both sides
+  m.tri(SNOW, ...[...sail].reverse());
+  const flag = [[1.20, 0.50, 1.32], [1.20, 0.50, 1.46], [1.46, 0.50, 1.39]];
+  m.tri(BRICK, ...flag);
+  m.tri(BRICK, ...[...flag].reverse());
+}
+
+function fence(m) {
+  for (const z of [0.38, 0.62]) box(m, WOOD, 1.42, 0.50, z, 2.92, 0.05, 0.10);  // rails
+  for (const x of [0.06, 0.97, 1.88, 2.79]) {
+    box(m, WOOD, x, 0.50, 0.46, 0.11, 0.11, 0.88);                      // pickets
+    tube(m, WOOD, x, 0.50, 0.89, 0.99, 0.085, 0, 4, false, false);      // …with a tip
+  }
+}
+
+function ruins(m) {
+  const stone = m.mark();
+  // A broken L: each segment of both walls has its own height and a little jitter
+  // off the wall line, so they read as collapsed masonry, not a staircase.
+  const alongY = [[0.14, 0.24, 1.32], [0.22, 0.34, 0.72], [0.15, 0.30, 1.06], [0.21, 0.26, 0.48], [0.17, 0.26, 0.86]];
+  let y = 0.02;
+  for (const [cx, len, top] of alongY) {
+    box(m, STONE, cx, y + len / 2, top / 2, 0.34, len, top);
+    y += len;
+  }
+  const alongX = [[0.46, 1.00], [0.30, 1.20], [0.32, 0.62]];
+  let x = 0.40;
+  for (const [len, top] of alongX) {
+    box(m, STONE, x + len / 2, 0.18, top / 2, len, 0.34, top);
+    x += len;
+  }
+  tube(m, STONE, 1.62, 1.62, 0.0, 1.52, 0.24, 0.20, 8, true, true);     // column, broken off
+  ball(m, STONE, 0.92, 1.55, 0.16, 0.20, 0.20, 0.17, 6, 3);             // rubble
+  ball(m, STONE, 1.42, 0.92, 0.14, 0.17, 0.17, 0.15, 6, 3);
+  m.paint(stone, (f) => (f.n[2] > 0.9 ? GRASS : null));                 // moss where it is flat
+}
+
+function tree(m) {
+  tube(m, WOOD, 0.50, 0.50, 0.0, 1.10, 0.17, 0.12, 7, false, false);    // trunk, into the canopy
+  const crown = m.mark();
+  ball(m, LEAF, 0.50, 0.50, 1.45, 0.55, 0.55, 0.52, 9, 4);              // canopy
+  ball(m, LEAF, 0.22, 0.40, 1.20, 0.34, 0.34, 0.32, 7, 3);
+  ball(m, LEAF, 0.76, 0.46, 1.16, 0.32, 0.32, 0.30, 7, 3);
+  ball(m, LEAF, 0.50, 0.50, 1.88, 0.32, 0.32, 0.30, 6, 3);
+  m.paint(crown, (f, i) => (f.c[2] > 1.15 && f.n[2] > 0.65 && i % 4 === 0 ? BRICK : null));  // fruit
+}
+
+function pine(m) {
+  tube(m, WOOD, 0.50, 0.50, 0.0, 0.55, 0.16, 0.14, 6, false, true);    // trunk
+  const tiers = [[0.35, 1.40, 0.68, 9], [1.05, 2.10, 0.56, 9], [1.75, 2.80, 0.44, 8], [2.45, 3.40, 0.30, 7]];
+  for (const [z0, z1, r, seg] of tiers) tube(m, LEAF, 0.50, 0.50, z0, z1, r, 0, seg, false, false);
+}
+
+function house(m) {
+  const x0 = 0.10, x1 = 3.90, y0 = 0.20, y1 = 2.80, zT = 1.08;
+  const inside = [2.00, 1.50, 0.50];
+  const door = (col, row) => (col === 1 ? SLATE : null);                // a doorway, both rows
+  const lit = (col, row) => (row === 1 && col !== 1 ? SAND : null);     // a window upstairs
+  // Four walls, each split into cells so the door and the windows are the wall
+  // itself, never a patch laid on it.
+  grid(m, BRICK, [x1, y0, 0], [x1, y1, 0], [x1, y1, zT], [x1, y0, zT], 3, 2, (c, r) => door(c, r) ?? lit(c, r), inside);
+  grid(m, BRICK, [x1, y1, 0], [x0, y1, 0], [x0, y1, zT], [x1, y1, zT], 3, 2, (c, r) => lit(c, r), inside);
+  grid(m, BRICK, [x0, y1, 0], [x0, y0, 0], [x0, y0, zT], [x0, y1, zT], 3, 2, (c, r) => lit(c, r), inside);
+  grid(m, BRICK, [x0, y0, 0], [x1, y0, 0], [x1, y0, zT], [x0, y0, zT], 3, 2, (c, r) => lit(c, r), inside);
+  roof(m, SLATE, 2.00, 1.50, 1.00, 1.95, 4.00, 3.00);                   // roof, overhanging
+  box(m, BRICK, 0.75, 0.75, 1.62, 0.34, 0.34, 0.72);                    // chimney
+}
+
+/* ── placement ───────────────────────────────────────────────────────── */
+
+/**
+ * Register a model: build its mesh, drop its bounding box onto the origin, and
+ * work out how many whole blocks it claims. The mesh is centred in that
+ * footprint — the grid is the placement's business, not the model's — and models
+ * keep their proportions, so the duck stands about a block tall and the house is
+ * about four across.
+ */
+function define(id, name, build) {
+  const m = new Mesh();
+  build(m);
+
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const v of m.verts) {
+    for (let a = 0; a < 3; a++) {
+      if (v[a] < lo[a]) lo[a] = v[a];
+      if (v[a] > hi[a]) hi[a] = v[a];
+    }
+  }
+  for (const v of m.verts) for (let a = 0; a < 3; a++) v[a] -= lo[a];
+  for (const f of m.faces) for (let a = 0; a < 3; a++) f.c[a] -= lo[a];
+
+  const span = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+  const w = Math.ceil(span[0] - 1e-6), h = Math.ceil(span[1] - 1e-6), hz = Math.ceil(span[2] - 1e-6);
+  MODELS.push({
+    id,
+    name,
+    verts: m.verts,
+    faces: m.faces,
+    size: { w, h, hz },
+    offset: { x: (w - span[0]) / 2, y: (h - span[1]) / 2 },
+  });
+}
+
+define('duck', 'Duck', duck);
+define('mushroom', 'Mushroom', mushroom);
+define('bush', 'Bush', bush);
+define('campfire', 'Campfire', campfire);
+define('boulder', 'Boulder', boulder);
+define('snowman', 'Snowman', snowman);
+define('cactus', 'Cactus', cactus);
+define('well', 'Well', well);
+define('boat', 'Boat', boat);
+define('fence', 'Fence', fence);
+define('ruins', 'Ruins', ruins);
+define('tree', 'Tree', tree);
+define('pine', 'Pine', pine);
+define('house', 'House', house);
+
+/** How many whole blocks a model claims when it is placed. */
+export function modelSize(model) {
+  return model.size;
 }
 
 /**
- * The model's mini-voxels as world-space boxes, centred in the footprint it
- * claims and based at `z`. Every box is `1 / res` of a block across.
+ * Where the model's local origin sits in the world when it is placed on the
+ * block column `x, y` at level `z`: centred in its footprint, based on `z`.
  */
-export function modelBoxes(model, x, y, z) {
-  const { w, h, mini } = modelSize(model);
-  const res = model.res;
-  const u = 1 / res;
-  const ox = (w * res - mini.w) / 2;
-  const oy = (h * res - mini.h) / 2;
-  return model.voxels.map(([mx, my, mz, mat]) => ({
-    x: x + (mx + ox) * u,
-    y: y + (my + oy) * u,
-    z: z + mz * u,
-    u, mat,
-  }));
+export function modelOrigin(model, x, y, z) {
+  return { x: x + model.offset.x, y: y + model.offset.y, z };
 }
