@@ -2,6 +2,7 @@
 // command stack for undo/redo.
 
 import { CHUNK, Z_MIN, Z_MAX } from './iso.js';
+import { normalizeDef } from './caps.js';
 
 // The materials a block can be. Ids are what a voxel stores, so the first nine
 // keep their places and anything new goes on the end: an old save still reads
@@ -37,7 +38,12 @@ export class World {
     this.chunks = new Map();   // "cx:cy" -> { cx, cy, data: Map<localKey, matId> }
     this.tops = new Map();     // "x,y"   -> highest z (for column ops)
     this.notes = [];
-    this.chats = [];          // harness tiles: { id, x, y, w, h }
+    // Tiles that carry something live: a harness chat (`{ id, x, y, w, h }`) or
+    // a card (`{ …, cap, def, state }`, see src/caps.js). Both are footprints on
+    // the ground with a warped readout standing in for ink, so they share one
+    // list, one renderer branch and one set of undo commands.
+    this.chats = [];
+    this.caps = {};           // capability definitions by id: what a card may be
     this.props = [];          // placed models: { id, model, x, y, z, rot }
     this.undoStack = [];
     this.redoStack = [];
@@ -386,6 +392,65 @@ export class World {
     this._commit({ kind: 'chat-patch', id, before, after: { ...patch } });
   }
 
+  /* ── cards ─────────────────────────────────────────────────────────── */
+
+  /** A card is the same tile record with something to show instead of a chat. */
+  card(id) {
+    const c = this.chat(id);
+    return c && (c.cap !== undefined || c.def !== undefined) ? c : undefined;
+  }
+
+  get cards() { return this.chats.filter((c) => c.cap !== undefined || c.def !== undefined); }
+
+  /** Place a card: an ordinary tile, so it undoes and saves like one. */
+  addCard(card) {
+    // Ids are how a tile is addressed — by its session, its element and the
+    // island's own files — so a second tile wearing one would be a ghost: the
+    // map of elements is keyed by id, and the first one would be orphaned.
+    if (this.chat(card.id)) throw new Error(`a tile with id ${card.id} is already on the island`);
+    this.addChat(card);
+  }
+
+  /** The definition a card runs: inline, else the named capability. */
+  cardDef(card) {
+    if (!card) return null;
+    if (card.def) return normalizeDef(card.def, card.cap || card.id);
+    if (card.cap && this.caps[card.cap]) return normalizeDef(this.caps[card.cap], card.cap);
+    return null;
+  }
+
+  /**
+   * Define (or redefine) a capability. A definition is a document the cards on
+   * this island are written against, not an edit to the island, so it is saved
+   * with the world but never joins the undo stack — removing one is its own
+   * deliberate call.
+   */
+  defineCap(id, def) {
+    this.caps[id] = Object.assign({ id }, def || {});
+    this.rev++;
+    return this.caps[id];
+  }
+
+  removeCap(id) {
+    const had = id in this.caps;
+    delete this.caps[id];
+    if (had) this.rev++;
+    return had;
+  }
+
+  /**
+   * A card's own scratch values — the countdown it is running, the keys its
+   * calculator has pressed. Deliberately not an undoable command: nobody wants
+   * `Ctrl+Z` to un-press a keypad, and a timer has to keep counting.
+   */
+  setCardState(id, state) {
+    const c = this.card(id);
+    if (!c) return false;
+    c.state = Object.assign({}, c.state, state);
+    this.rev++;
+    return true;
+  }
+
   /* ── persistence ───────────────────────────────────────────────────── */
 
   serialize() {
@@ -398,10 +463,23 @@ export class World {
       }
     }
     return {
-      version: 4,
+      version: 5,
       voxels,
       notes: this.notes.map((n) => ({ id: n.id, x: n.x, y: n.y, w: n.w, h: n.h, color: n.color, fs: n.fs, html: n.html })),
-      chats: this.chats.map((c) => ({ id: c.id, x: c.x, y: c.y, w: c.w, h: c.h, color: c.color, fs: c.fs })),
+      chats: this.chats.map((c) => {
+        const tile = { id: c.id, x: c.x, y: c.y, w: c.w, h: c.h, color: c.color, fs: c.fs };
+        // A card's definition and its scratch state travel with it, so an
+        // exported island shows the same readouts on the machine that opens it.
+        if (c.cap !== undefined) tile.cap = c.cap;
+        if (c.def !== undefined) tile.def = c.def;
+        if (c.state !== undefined) tile.state = c.state;
+        if (c.name !== undefined) tile.name = c.name;
+        // Which harness tile asked for it, when one did: a card an agent made
+        // stays traceable to the conversation that made it.
+        if (c.by !== undefined) tile.by = c.by;
+        return tile;
+      }),
+      caps: this.caps,
       props: this.props.map((p) => ({ id: p.id, model: p.model, x: p.x, y: p.y, z: p.z, rot: p.rot | 0 })),
     };
   }
@@ -419,6 +497,12 @@ export class World {
     for (const [x, y, z, mat] of data.voxels || []) this.set(x, y, z, mat);
     for (const n of data.notes || []) this.notes.push(normalizeNote(n));
     for (const c of data.chats || []) this.chats.push(normalizeChat(c));
+    this.caps = {};
+    if (data.caps && typeof data.caps === 'object') {
+      for (const [id, def] of Object.entries(data.caps)) {
+        if (def && typeof def === 'object') this.caps[id] = Object.assign({ id }, def);
+      }
+    }
     // Unknown model ids are kept: the renderer simply skips them, which beats
     // silently dropping someone's work on load.
     for (const p of data.props || []) {
@@ -445,6 +529,11 @@ export const NOTE_NEW = { w: 6, h: 4 };
 // size and a cycled colour — so the world view reads as one family of tiles.
 export const CHAT_NEW = { w: 9, h: 6 };
 export const CHAT_PAPER = ['#151b24', '#1e2440', '#0f2a24', '#33191d', '#2b1e3d', '#2e2a12'];
+
+// A card is a readout, not a conversation: it wants a glance-sized slab next to
+// the harness that made it, and it grows with the same corner handles if the
+// value deserves more room.
+export const CARD_NEW = { w: 4, h: 3 };
 
 // Preview text size, in tile-local px (NOTE_U per block). The default is small
 // on purpose: a tile is a post-it, and the `−`/`+` buttons in its toolbar trade
@@ -490,10 +579,11 @@ export function normalizeNote(raw) {
 /**
  * A harness tile is just a footprint: its conversation lives in the omp session
  * keyed by its id (under `.island/harness/<id>/` on the dev server), so a save
- * only has to remember where the tile sits.
+ * only has to remember where the tile sits. A card carries its capability and
+ * its own scratch state as well — see src/caps.js.
  */
 export function normalizeChat(raw) {
-  return {
+  const chat = {
     id: raw.id || uid(),
     x: Math.round(Number(raw.x) || 0),
     y: Math.round(Number(raw.y) || 0),
@@ -502,6 +592,21 @@ export function normalizeChat(raw) {
     color: Number(raw.color) | 0,
     fs: clampFs(raw.fs),
   };
+  if (raw.cap !== undefined && raw.cap !== null && raw.cap !== '') chat.cap = String(raw.cap);
+  if (raw.def && typeof raw.def === 'object') chat.def = raw.def;
+  if (raw.state && typeof raw.state === 'object') chat.state = plainValues(raw.state);
+  if (raw.name !== undefined) chat.name = String(raw.name);
+  if (raw.by !== undefined && raw.by !== null && raw.by !== '') chat.by = String(raw.by);
+  return chat;
+}
+
+/** The primitive entries of an object, and nothing else. */
+function plainValues(v) {
+  const out = {};
+  for (const [k, val] of Object.entries(v)) {
+    if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') out[k] = val;
+  }
+  return out;
 }
 
 let seq = 0;

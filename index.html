@@ -200,7 +200,9 @@
           <li><b>Click the tile</b> — open the chat: type a message, read the reply and every
               tool call streaming in, or stop a turn with <b>■</b></li>
           <li>Each tile is its own real <code>omp</code> session, rooted in this project and
-              agentic — it can read, run and edit, like the terminal harness</li>
+              agentic — it can read, run and edit, like the terminal harness. It is also how
+              the world itself is scriptable: a harness can touch the island (build, note,
+              model, stamp) and author cards, so the world view is something an agent works in</li>
           <li><b>⟲</b> in the chat starts a fresh session · <b>×</b> removes the tile
               (undo brings it back)</li>
           <li><b>●</b> cycles the slab colour · <b>−</b> / <b>+</b> set the preview text
@@ -212,6 +214,11 @@
               <b>waiting for input</b> until you answer</li>
           <li>Tiles need the dev server (<code>python3 serve.py</code>), which bridges the page
               to <code>omp</code>; a conversation survives a reload</li>
+          <li>A harness can also put a <b>card</b> on the island: a tile whose ink is a live
+              readout instead of a chat — a count of uncommitted files, CPU, a countdown, a
+              keypad. It is written against a capability (data, never code), so ask a tile
+              for one in words and it appears beside it; <b>↻</b> reads it again now, and it
+              keeps the same colour, size, handles and undo as any tile</li>
         </ul>
       </div>
       <div>

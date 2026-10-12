@@ -5,10 +5,17 @@
 // a note), while this module paints the live transcript into the ground plane
 // with the projection's own matrix. The world view therefore shows the stream
 // as it arrives; opening the tile hands the same session to a real chat window.
+//
+// The same slab hosts a *card*: a tile whose ink is a readout a harness authored
+// (src/caps.js) instead of a transcript, with the same handles, grip, colour and
+// preview size. A card is recognised by its record carrying a capability, and
+// then there is no omp session behind it at all — `src/cards.js` keeps the live
+// half and this module only places, typesets and frames it.
 
 import { project, ISO, NOTE_U } from './iso.js';
 import { NOTE_MIN, NOTE_MAX, CHAT_NEW, FS_MIN, FS_MAX, FS_DEFAULT, FS_STEP, clampFs } from './world.js';
 import { sessionFor } from './omp.js';
+import { paintCard, headerOf, refreshCard, dropCard } from './cards.js';
 
 // How far outside the slab (in tile-local px) still counts as "on the tile",
 // wide enough to bridge the gap to the hover toolbar and the corner handles.
@@ -29,6 +36,9 @@ const fitLadder = (base) => {
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+/** A tile is a card when its record names a capability instead of a session. */
+const isCard = (tile) => tile.cap !== undefined || tile.def !== undefined;
 
 export class Harnesses {
   /**
@@ -120,24 +130,32 @@ export class Harnesses {
         this.els.set(chat.id, el);
         this.layer.appendChild(el);
       }
-      const session = sessionFor(chat.id);
-      if (!el._unsub) el._unsub = session.on(() => this.paint(el, chat));
-      session.open();          // a tile in the world is a live harness
-      this.paint(el, chat, session);
+      if (isCard(chat)) {
+        // A card has no process behind it: src/cards.js reads its source on the
+        // definition's own cadence and rebuilds the ink when the reading changes.
+        this.paintCardTile(el, chat);
+      } else {
+        const session = sessionFor(chat.id);
+        if (!el._unsub) el._unsub = session.on(() => this.paint(el, chat));
+        session.open();          // a tile in the world is a live harness
+        this.paint(el, chat, session);
+      }
       if (el.dataset.dragging !== '1') this.place(el, chat, cam);
       else if (viewChanged) this.place(el, chat, cam);
       // Typeset once the sheet has its block size — and again whenever the
-      // tile's preview size changes under us.
+      // tile's preview size changes under us, or a card's ink is redrawn.
       const fs = String(clampFs(chat.fs));
-      if (!el.dataset.fitted || el.dataset.fs !== fs) {
+      if (!el.dataset.fitted || el.dataset.fs !== fs || el.dataset.fit === '1') {
         el.dataset.fitted = '1';
         el.dataset.fs = fs;
+        el.dataset.fit = '0';
         this.fit(el);
       }
     }
     for (const [id, el] of this.els) {
       if (!live.has(id)) {
         if (el._unsub) el._unsub();
+        if (el.dataset.card === '1') dropCard(id);
         el.remove();
         this.els.delete(id);
       }
@@ -174,6 +192,32 @@ export class Harnesses {
     el.querySelector('.c-fs-up').disabled = fs >= FS_MAX;
   }
 
+  /* ── cards ─────────────────────────────────────────────────────────── */
+
+  /**
+   * Bring one card's slab up to date. The reading and the ink come from
+   * src/cards.js; all that is left here is the header, which carries the
+   * capability's name and the state of its last read.
+   */
+  paintCardTile(el, chat) {
+    paintCard(el, chat);                     // the ink, only when it changed
+    const head = headerOf(this.world, chat);
+    const title = el.querySelector('.ctitle');
+    if (title.textContent !== head.name) title.textContent = head.name;
+    const state = el.querySelector('.cstate');
+    if (state.textContent !== head.label) state.textContent = head.label;
+    if (state.title !== (head.title || '')) state.title = head.title || '';
+    el.dataset.phase = head.tone;
+    el.classList.toggle('offline', head.tone === 'error');
+
+    const size = el.querySelector('.size');
+    const label = `${chat.w}×${chat.h}`;
+    if (size.textContent !== label) size.textContent = label;
+    const fs = clampFs(chat.fs);
+    el.querySelector('.c-fs-down').disabled = fs <= FS_MIN;
+    el.querySelector('.c-fs-up').disabled = fs >= FS_MAX;
+  }
+
   /* ── preview typography (the note tile's ladder, over the stream) ──── */
 
   /** Coalesce refits to one per frame, since the stream rewrites the body. */
@@ -193,6 +237,9 @@ export class Harnesses {
    * never shows half a line.
    */
   fit(el) {
+    // A shaped card is not text: its ink is a ring, a bar, a keypad or a
+    // sparkline, so the ladder below would only move its font size.
+    if (el.dataset.card === '1' && el.dataset.layout === 'scale') return this.fitScale(el);
     const body = el.querySelector('.term-body');
     if (!body || !body.clientHeight) return;   // nothing to measure until attached
     body.style.height = '';
@@ -223,6 +270,34 @@ export class Harnesses {
     if (badge) badge.title = fits ? 'Tile size in blocks' : 'Text is clipped — resize the tile or open the chat';
   }
 
+  /**
+   * Scale a shaped card's ink to the slab. Its own preview size is what the
+   * ink is drawn at, so `−`/`+` still trade size against room; past that the
+   * whole thing shrinks about its middle rather than being clipped, because
+   * half a ring says less than a small one.
+   */
+  fitScale(el) {
+    const body = el.querySelector('.term-body');
+    if (!body || !body.clientHeight) return;
+    body.style.height = '';
+    body.style.flex = '';
+    const chat = this.world.chat(el.dataset.id);
+    body.style.fontSize = clampFs(chat ? chat.fs : FS_DEFAULT) + 'px';
+    body.scrollTop = 0;
+    const ink = body.firstElementChild;
+    if (ink) {
+      ink.style.transform = '';
+      const iw = ink.scrollWidth;
+      const ih = ink.scrollHeight;
+      const k = iw && ih ? Math.min(1, body.clientWidth / iw, body.clientHeight / ih) : 1;
+      ink.style.transform = k < 0.999 ? `scale(${k.toFixed(3)})` : '';
+      el.classList.toggle('tight', k < 0.999);
+      const badge = el.querySelector('.size');
+      if (badge) badge.title = k < 0.999 ? 'Scaled down to fit the slab — make the tile bigger or press −' : 'Tile size in blocks';
+    }
+    el.dataset.lines = '1';
+  }
+
   place(el, chat, cam) {
     const o = this.originOf(chat, cam);
     el.style.transform = `translate3d(${o.x}px, ${o.y}px, 0)`;
@@ -250,14 +325,16 @@ export class Harnesses {
   /* ── DOM ───────────────────────────────────────────────────────────── */
 
   create(chat) {
+    const card = isCard(chat);
     const el = document.createElement('div');
-    el.className = 'chat fresh';
+    el.className = 'chat fresh' + (card ? ' card' : '');
     el.dataset.id = chat.id;
+    el.dataset.card = card ? '1' : '0';
     el.innerHTML =
       '<div class="sheet">' +
         '<div class="term">' +
           '<div class="term-head"><span class="cdot"></span>' +
-            '<span class="ctitle">omp</span><span class="cstate"></span></div>' +
+            `<span class="ctitle">${card ? 'card' : 'omp'}</span><span class="cstate"></span></div>` +
           '<div class="term-body"></div>' +
         '</div>' +
         '<span class="hz" data-edge="w" title="Drag to resize in blocks"></span>' +
@@ -270,16 +347,27 @@ export class Harnesses {
         '<button class="c-fs c-fs-up" title="Larger preview text">+</button>' +
         '<button class="c-grip" title="Drag to move the tile">⠿</button>' +
         '<button class="c-color" title="Cycle slab colour">●</button>' +
-        '<button class="c-open" title="Open the harness chat">⤢</button>' +
-        '<button class="c-del" title="Delete this harness tile">×</button>' +
+        (card
+          ? '<button class="c-refresh" title="Read this card again now">↻</button>'
+          : '<button class="c-open" title="Open the harness chat">⤢</button>') +
+        `<button class="c-del" title="${card ? 'Delete this card' : 'Delete this harness tile'}">×</button>` +
       '</div>';
 
     const sheet = el.querySelector('.sheet');
     setTimeout(() => el.classList.remove('fresh'), 200);
 
     const open = (e) => { e.stopPropagation(); this.hooks.onOpen(chat.id); };
-    sheet.addEventListener('click', open);
-    el.querySelector('.c-open').addEventListener('click', open);
+    if (card) {
+      // There is no conversation behind a card: its extra button reads its
+      // source again, which is what "look at it now" means for a readout.
+      el.querySelector('.c-refresh').addEventListener('click', (e) => {
+        e.stopPropagation();
+        refreshCard(chat.id);
+      });
+    } else {
+      sheet.addEventListener('click', open);
+      el.querySelector('.c-open').addEventListener('click', open);
+    }
     el.querySelector('.c-del').addEventListener('click', (e) => {
       e.stopPropagation();
       this.hooks.onDelete(chat.id);

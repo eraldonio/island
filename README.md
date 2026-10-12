@@ -29,6 +29,12 @@ anything else, the tiles still place and draw; they just read
 Sessions live in `.island/harness/<tile id>/` and are resumed with `--continue`,
 so a conversation outlives a reload (or a restart of this server).
 
+**Cards** read the world through the same server. A card's `probe` source names
+one of the reads `serve.py` knows (git, CPU, memory — `sh` is off unless you set
+`ISLAND_CARDS_SHELL=1`), and an `http` source is a GET it proxies for the page:
+HTTPS only, and only origins listed in `ISLAND_FETCH_ORIGINS`, so a token stays
+in the server's environment instead of in a save or an export.
+
 Opening `index.html` over `file://` will not work: the app uses ES modules,
 which browsers refuse to load from the filesystem.
 
@@ -218,6 +224,7 @@ and nothing changes.
 | `island_model` | stand a prefab model on a column, or move and turn a placed one |
 | `island_island` | stamp a whole preconfigured island — relief, models and notes — as one step |
 | `island_harness` | drop a new harness tile and send it a first prompt |
+| `island_card` | place, define, move, remove or describe a **card** — a live readout a harness authored (see below) |
 | `island_remove` | remove a note, a model or a harness tile by id |
 
 Every session gets them, so a harness can hand work to a harness: the new tile
@@ -225,6 +232,77 @@ has the same surface and works on the same world, and its answer streams on its
 own slab instead of being reported back. Because the tools are the page's, the
 world they touch is the one you are looking at — the tab has to be open, which is
 also why an edit an agent makes is on the same undo stack as your own.
+
+**Cards are readouts a harness writes.** A card is a tile with no session behind
+it: the same slab, the same handles, grip, colour and preview size as a harness
+tile, but its ink is a reading that keeps itself up to date — how many files are
+uncommitted, CPU, a countdown, a keypad. It is described by **data, never by
+code**, and that is what makes it safe to hand to an agent:
+
+```json
+{
+ "id": "git-dirty",
+ "name": "Uncommitted files",
+ "badge": "git",
+ "source": { "kind": "probe", "probe": "git", "every": 4000 },
+ "value": "v",
+ "render": { "as": "number", "label": "dirty", "tone": "v > 0 ? \"warn\" : \"ok\"" },
+ "staleAfter": 20000
+}
+```
+
+* **source** — where the number comes from: `value` (a constant you write),
+  `clock` (the wall clock), `probe` (a read the dev server performs: `git`,
+  `cpu`, `mem`, and `sh` behind `ISLAND_CARDS_SHELL=1`), or `http` (a GET the
+  server proxies, so the page needs no CORS and no token — only origins listed in
+  `ISLAND_FETCH_ORIGINS` are allowed, HTTPS only).
+* **value** — an expression over `v` (the source's reading), `now`, `state`,
+  `sub` and `age`. It is parsed, never `eval`ed: arithmetic, comparisons, `?:`,
+  strings and a fixed function table (`min`, `max`, `round`, `clamp`, `calc`, …).
+  No assignment, no indexing, and no way to reach anything the card was not
+  handed; a name that is not in scope is an error the tile shows, not a silent
+  zero.
+* **render** — `number`, `text`, `list`, `table`, `ring`, `bar`, `spark` or
+  `keypad`, plus a label, unit, `decimals`, `max`, and `tone` (an expression
+  naming a mood, which colours the value).
+* **buttons** — a ▶ / ⏸ / ⟲ row, or a keypad: each press runs small `set`
+  expressions against the card's own `state`, which is saved with the card. A
+  countdown therefore survives a reload, and a calculator keeps its display.
+
+An unknown source, renderer or function is not a broken page: the tile reads
+`unsupported: …` and stays legible, fixable and deletable. The whole vocabulary —
+with worked examples of a countdown and a calculator — is served from the world
+itself at `island://caps/`, so the description of the language cannot drift from
+the language.
+
+**The island as a filesystem.** A harness authors cards and capabilities by
+reading and writing `island://` URLs with its ordinary `read` and `write` tools
+(`set_host_uri_schemes`; the tree is `src/islanduri.js`):
+
+| Path | |
+| --- | --- |
+| `island://caps/` | the language: sources, renderers, expressions, examples, and what is defined here |
+| `island://caps/<id>.json` | read a capability; **write** to define or replace one |
+| `island://cards/` | every card, with what it is reading |
+| `island://cards/<id>.json` | read one card and its current reading; **write** to place or change it |
+| `island://world/` | where things are, and where a new card fits |
+
+A write is checked where it lands: a definition with an unknown source, an
+unknown renderer, or an expression that will not parse comes back as a tool error
+naming the problem, so the author fixes the file rather than the card. A card
+written without `x`/`y` lands beside the harness tile that asked — the bridge
+tags every request with its session — and records `by`, so a card stays
+traceable to the conversation that made it. Both kinds of write are the world's:
+cards undo, save and export like anything else. A card's own scratch state (the
+seconds left, the keys pressed) is deliberately the exception — nobody wants
+`Ctrl+Z` to un-press a keypad. The `island_card` tool is the same surface in one
+call, for an agent that would rather not write a file.
+
+A card has its own clock. The app draws a frame only when something asks it to,
+so `src/cards.js` watches each card's cadence, starts the reads that are due, and
+asks for a frame only when the readout would actually change: a countdown asks
+for about one a second, a probe when its answer lands, a constant never, and a
+hidden tab none at all.
 
 **Prefab models.** `src/models.js` is a small library of low-poly models (tree,
 pine, bush, house, duck, boat, boulder, cactus, well, campfire, mushroom,
@@ -310,6 +388,9 @@ src/notes.js    note tiles: warped DOM ink, resize handles, proximity hover
 src/harness.js  harness tiles and the chat window: same tile maths, live stream
 src/omp.js      the omp session behind one tile: RPC commands + event transcript
 src/hosttools.js  the island tools a harness tile can call, and the edits they make
+src/caps.js     the card language: sources, the expression parser, the renderers
+src/cards.js    the card runtime: readings, cadence, and the ink a card draws
+src/islanduri.js  `island://`: the island as the files a harness reads and writes
 src/models.js   the low-poly prefab library (polygon meshes + placement helpers)
 src/models.pack.js  models baked from CC0 packs (generated, do not edit)
 src/islands.js  the preconfigured islands: relief, elements and notes, stamped whole
@@ -357,6 +438,21 @@ the library. From the console, `island.islands` is the panel and
 `island.islands.island` the selected island; `island.world.stamp(parts)` takes the
 same parts `islandParts` produces, which is how the tool places one.
 
+A card is a harness tile with a capability instead of a conversation:
+`{ id, x, y, w, h, color, fs, cap, def?, state?, by? }` — the capability it runs,
+named (`cap`, resolved in `world.caps`) or inline (`def`), the scratch `state`
+its buttons write, and the tile that made it. Its *readings* are not saved: they
+are a live view of the world, not part of it. Capabilities are saved with the
+world, so an exported island shows the same readouts wherever it is opened:
+
+```js
+island.world.defineCap('git-dirty', { name: 'Uncommitted files', badge: 'git',
+  source: { kind: 'probe', probe: 'git', every: 4000 }, value: 'v',
+  render: { as: 'number', label: 'dirty' } })
+island.world.addCard({ id: 'dirty', x: 8, y: 8, w: 4, h: 3, cap: 'git-dirty' })
+island.world.cards, island.world.caps, island.world.card('dirty').state
+```
+
 ## Limits
 
 * The world is bounded to `z = 0…128`; x and y are unbounded.
@@ -392,3 +488,22 @@ same parts `islandParts` produces, which is how the tool places one.
 * A harness tile shows the *tail* of its conversation (the last few lines that
   fit); open it for the whole transcript. Its text is drawn plain, so markdown
   reads as source there rather than typeset.
+* A card can only say what the vocabulary says. An agent may compose a source, an
+  expression and a renderer; it may not bring its own UI code, because a
+  definition is a document that ends up in `localStorage` and in an export you
+  might paste into a chat. A genuinely new kind of widget — a map, a game — is a
+  renderer in `src/caps.js`, written by you. What an agent *can* invent is
+  unbounded in the other direction: any probe or expression over it, with
+  buttons, thresholds and its own saved state.
+* A card's `probe` and `http` sources run on the dev server, not in the page:
+  `probe` is an allowlist (`PROBES` in `serve.py`), `http` needs the origin in
+  `ISLAND_FETCH_ORIGINS`, and `sh` is off unless you set `ISLAND_CARDS_SHELL=1`.
+  A source that cannot answer is shown on the slab — the reading stays, with the
+  reason and the age beside it — and a card whose source has never answered says
+  `waiting`. Served by anything but `serve.py`, cards still place and draw; their
+  sources read `unavailable`.
+* A card bends to the same tile rules as a note: it rests on the highest block
+  under its footprint and is drawn in the painter order, so terrain in front
+  covers it. A shaped card (a ring, a bar, a keypad) is scaled to fit its slab
+  rather than clipped, so a small tile shows the whole thing smaller instead of
+  half of it.
