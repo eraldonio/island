@@ -4,8 +4,10 @@ import { World, PALETTE, PAPER, CHAT_PAPER, seedStarter, uid, NOTE_NEW, FS_DEFAU
 import { Renderer } from './render.js';
 import { Notes, sanitizeHtml } from './notes.js';
 import { Harnesses, ChatWindow } from './harness.js';
-import { dropSession, dropAllSessions, setHostTools, setHostToolRunner } from './omp.js';
+import { dropSession, dropAllSessions, setHostTools, setHostToolRunner, setHostUriSchemes, setHostUriRunner } from './omp.js';
 import { HOST_TOOLS, bindHostTools, runHostTool } from './hosttools.js';
+import { startCards } from './cards.js';
+import { bindIslandUri, runHostUri, ISLAND_SCHEME } from './islanduri.js';
 import { raycast, unproject, viewOf, ISO, Z_MAX, SPIN0, TILT0, TILT_MAX } from './iso.js';
 import { targetsFor, BRUSHES } from './tools.js';
 import { Gallery, IslandGallery } from './gallery.js';
@@ -991,9 +993,11 @@ function updateStatus() {
   setText($('st-pos'), hover ? `${hover.x}, ${hover.y} · h ${hover.ground ? 0 : hover.z + 1}` : '–');
   const nb = world.count;
   const nn = world.notes.length;
-  const nc = world.chats.length;
+  const cards = world.cards.length;
+  const nh = world.chats.length - cards;
   let counts = `${nb} block${nb === 1 ? '' : 's'} · ${nn} note${nn === 1 ? '' : 's'}`;
-  if (nc) counts += ` · ${nc} harness${nc === 1 ? '' : 'es'}`;
+  if (nh) counts += ` · ${nh} harness${nh === 1 ? '' : 'es'}`;
+  if (cards) counts += ` · ${cards} card${cards === 1 ? '' : 's'}`;
   setText($('st-count'), counts);
   setText($('st-zoom'), Math.round(cam.scale * 100) + '%');
   $('a-undo').disabled = !world.canUndo();
@@ -1299,6 +1303,17 @@ invalidate();
 bindHostTools({ world, cam, invalidate, requestSave, removeNote: deleteNote, removeChat: deleteChat });
 setHostTools(HOST_TOOLS);
 setHostToolRunner(runHostTool);
+
+// Cards: a tile whose ink is a readout rather than a transcript, written against
+// a capability (src/caps.js) and kept live by src/cards.js — which starts its own
+// clock, since the frame loop only runs when something asks it to. The other half
+// of the harness surface is the island itself as a filesystem — `island://`,
+// served by src/islanduri.js — so an agent authors cards and capabilities by
+// reading and writing them, with the tool above as the shortcut for placing one.
+startCards({ world, invalidate, save: requestSave });
+bindIslandUri({ world, invalidate, save: requestSave });
+setHostUriSchemes([ISLAND_SCHEME]);
+setHostUriRunner(runHostUri);
 
 // Scripting hook: every part of the app is reachable from the console, e.g.
 //   island.world.get(0, 0, 0)      island.cam.scale = 2

@@ -35,6 +35,20 @@ export function setHostTools(defs) { hostTools = defs; }
 /** Where a host tool call is executed. */
 export function setHostToolRunner(fn) { hostRunner = fn; }
 
+// Host URIs: the island's own virtual files, declared to the harness with
+// `set_host_uri_schemes`. A read or write arrives as a `host_uri_request` frame
+// that this module serves and answers, dispatched exactly the way host tool
+// calls are. main.js binds the runner, so the transport stays ignorant of what
+// any particular `island://` URL means.
+let hostUriSchemes = null;            // RpcHostUriScheme[] { scheme, description, writable?, immutable? }
+let uriRunner = null;                 // (request) => Promise<{ content?, contentType? }>
+
+/** Declare the island's virtual URL schemes to every session this module opens. */
+export function setHostUriSchemes(schemes) { hostUriSchemes = schemes; }
+
+/** Where a host URI read or write is served. */
+export function setHostUriRunner(fn) { uriRunner = fn; }
+
 /** Text of a message or tool result content array. */
 function textOf(content) {
   if (typeof content === 'string') return content;
@@ -100,6 +114,8 @@ export class OmpSession {
     this.settleTimer = 0;
     this.hosts = new Map();      // host tool request id -> the answer already sent
     this.hostCancelled = new Set();   // host tool requests the harness withdrew
+    this.uris = new Map();       // host URI request id -> the answer already sent
+    this.uriCancelled = new Set();    // host URI requests the harness withdrew
   }
 
   /* ── transport ─────────────────────────────────────────────────────── */
@@ -334,6 +350,9 @@ export class OmpSession {
       // Every incarnation gets the island's tools: re-sending replaces the set,
       // so a harness that came back up on this tile has them again.
       if (hostTools) this.command({ id: `h${++this.seq}`, type: 'set_host_tools', tools: hostTools });
+      // Same for the island's virtual URL schemes: re-sending replaces the set,
+      // which is what a harness that came back up on this tile needs.
+      if (hostUriSchemes) this.command({ id: `u${++this.seq}`, type: 'set_host_uri_schemes', schemes: hostUriSchemes });
       return this.bump();
     }
     if (t === 'agent_start') {
@@ -370,6 +389,17 @@ export class OmpSession {
       // answer it (omp has already stopped caring).
       this.hostCancelled.add(f.targetId);
       if (this.hostCancelled.size > 200) this.hostCancelled.delete(this.hostCancelled.values().next().value);
+      return this.bump();
+    }
+    if (t === 'host_uri_request') {
+      this.uriCall(f);
+      return this.bump();
+    }
+    if (t === 'host_uri_cancel') {
+      // The turn was aborted while the read or write was in flight: remember
+      // not to answer it (omp has already stopped caring).
+      this.uriCancelled.add(f.targetId);
+      if (this.uriCancelled.size > 200) this.uriCancelled.delete(this.uriCancelled.values().next().value);
       return this.bump();
     }
     if (t === 'extension_ui_request') {
@@ -523,7 +553,7 @@ export class OmpSession {
     let answer;
     try {
       if (!hostRunner) throw new Error('the island is not wired to run harness tools');
-      answer = { result: await hostRunner(f.toolName, f.arguments || {}) };
+      answer = { result: await hostRunner(f.toolName, f.arguments || {}, { session: f.session }) };
     } catch (err) {
       answer = {
         isError: true,
@@ -539,6 +569,44 @@ export class OmpSession {
   answerHost(id, answer) {
     if (this.hostCancelled.delete(id)) return;
     this.command(Object.assign({ type: 'host_tool_result', id }, answer));
+  }
+
+  /**
+   * Serve one request against the island's own virtual files — an `island://`
+   * read or write — and answer it. A request that was already answered is
+   * answered again from the record rather than served a second time: a bridge
+   * reconnect can replay a frame, and re-running a write would lay the card
+   * down twice.
+   */
+  async uriCall(f) {
+    const id = f && f.id;
+    if (!id) return;
+    const seen = this.uris.get(id);
+    if (seen) return this.answerUri(id, seen);
+    let answer;
+    try {
+      if (!uriRunner) throw new Error('the island is not wired to run host URIs');
+      const r = (await uriRunner({ operation: f.operation, url: f.url, content: f.content, session: f.session })) || {};
+      if (f.operation === 'write' && typeof r.content !== 'string') {
+        answer = {};                   // a write came back empty: nothing to hand over
+      } else {
+        answer = {
+          content: typeof r.content === 'string' ? r.content : '',
+          contentType: r.contentType || 'text/plain',
+        };
+      }
+    } catch (err) {
+      answer = { isError: true, error: String((err && err.message) || err) };
+    }
+    this.uris.set(id, answer);
+    if (this.uris.size > 200) this.uris.delete(this.uris.keys().next().value);
+    this.answerUri(id, answer);
+  }
+
+  /** The frame omp expects for a virtual URL read or write. */
+  answerUri(id, answer) {
+    if (this.uriCancelled.delete(id)) return;
+    this.command(Object.assign({ type: 'host_uri_result', id }, answer));
   }
 
   /** Replace the transcript with a full history (get_messages). */
