@@ -9,7 +9,7 @@
 
 import { Z_MIN, Z_MAX, CHUNK, project, unproject, ISO } from './iso.js';
 import { PALETTE, PAPER } from './world.js';
-import { MODELS, modelSize, modelOrigin } from './models.js';
+import { MODELS, modelFrames } from './models.js';
 
 const MODELS_BY_ID = new Map(MODELS.map((m) => [m.id, m]));
 
@@ -112,20 +112,20 @@ function boxOutline(P0, U, V, W) {
 }
 
 /**
- * Painter for one model, used for the gallery thumbnails. The live renderer has
- * its own batched, culled path; this one trades speed for being obviously
- * correct: it back-face culls, sorts faces far-to-near by centroid depth, and
- * fills and strokes each face in the same flat tone.
+ * Painter for one model frame, used for the gallery thumbnails. The live
+ * renderer has its own batched, culled path; this one trades speed for being
+ * obviously correct: it back-face culls, sorts faces far-to-near by centroid
+ * depth, and fills and strokes each face in the same flat tone.
  */
-export function paintModel(ctx, model, { x = 0, y = 0, z = 0, view = ISO, scale = 1, ox = 0, oy = 0 } = {}) {
-  const o = modelOrigin(model, x, y, z);
+export function paintModel(ctx, frame, { x = 0, y = 0, z = 0, view = ISO, scale = 1, ox = 0, oy = 0 } = {}) {
+  const o = { x: x + frame.offset.x, y: y + frame.offset.y, z };
   const { U, V, W } = basisOf(view, scale);
   const bx = ox + (o.x * view.cos - o.y * view.sin) * view.H * scale;
   const by = oy + ((o.x * view.sin + o.y * view.cos) * view.D - o.z * view.C) * scale;
 
   // Back-face cull, then sort far-to-near by centroid depth along the view ray.
   const order = [];
-  for (const f of model.faces) {
+  for (const f of frame.faces) {
     const n = f.n;
     if (n[0] * view.dx + n[1] * view.dy + n[2] * view.dz <= 0) continue;
     order.push({ f, d: f.c[0] * view.dx + f.c[1] * view.dy + f.c[2] * view.dz });
@@ -141,7 +141,7 @@ export function paintModel(ctx, model, { x = 0, y = 0, z = 0, view = ISO, scale 
     const vs = f.v;
     ctx.beginPath();
     for (let i = 0; i < vs.length; i++) {
-      const p = model.verts[vs[i]];
+      const p = frame.verts[vs[i]];
       const sx = bx + p[0] * U.x + p[1] * V.x + p[2] * W.x;
       const sy = by + p[0] * U.y + p[1] * V.y + p[2] * W.y;
       if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
@@ -384,7 +384,8 @@ export class Renderer {
       const prop = props[pi];
       const model = MODELS_BY_ID.get(prop.model);
       if (!model) continue;
-      const size = modelSize(model);
+      const frame = modelFrames(model)[(prop.rot | 0) & 3];
+      const size = frame.size;
       let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
       for (const dx of [0, size.w]) {
         for (const dy of [0, size.h]) {
@@ -401,13 +402,13 @@ export class Renderer {
 
       // The prop's screen origin, and the linear coefficients that map a local
       // vertex offset to screen px. Both are view-constant, so no trig is
-      // recomputed per vertex.
-      const o = modelOrigin(model, prop.x, prop.y, prop.z);
+      // recomputed per vertex. The mesh is the one for this quarter turn.
+      const o = { x: prop.x + frame.offset.x, y: prop.y + frame.offset.y, z: prop.z };
       const bx = (o.x * v.cos - o.y * v.sin) * v.H * scale + ox;
       const by = ((o.x * v.sin + o.y * v.cos) * v.D - o.z * v.C) * scale + oy;
-      const verts = model.verts;
+      const verts = frame.verts;
 
-      for (const f of model.faces) {
+      for (const f of frame.faces) {
         const fn = f.n;
         if (fn[0] * v.dx + fn[1] * v.dy + fn[2] * v.dz <= 0) continue;   // back-face cull
         const idx = f.v;

@@ -1,7 +1,7 @@
 // Model gallery: the panel of low-poly prefabs, each previewed with the same
 // projection and palette the world uses, so a card shows what you will get.
 
-import { MODELS, modelOrigin } from './models.js';
+import { MODELS, modelFrames } from './models.js';
 import { paintModel } from './render.js';
 import { project, ISO } from './iso.js';
 
@@ -64,11 +64,12 @@ export class Gallery {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, THUMB, THUMB);
 
-    // Fit and centre on the model's own world-space bounds: the verts, placed
-    // by the same origin offset the painters use.
-    const o = modelOrigin(model, 0, 0, 0);
+    // Fit and centre on the model's own world-space bounds: the verts of its
+    // first quarter turn, placed by the same origin offset the painters use.
+    const frame = modelFrames(model)[0];
+    const o = { x: frame.offset.x, y: frame.offset.y, z: 0 };
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const p of model.verts) {
+    for (const p of frame.verts) {
       const q = project(o.x + p[0], o.y + p[1], o.z + p[2], ISO);
       if (q.x < minX) minX = q.x;
       if (q.x > maxX) maxX = q.x;
@@ -81,6 +82,6 @@ export class Gallery {
     const ox = (THUMB - spanX * scale) / 2 - minX * scale;
     const oy = (THUMB - spanY * scale) / 2 - minY * scale;
 
-    paintModel(ctx, model, { view: ISO, scale, ox, oy });
+    paintModel(ctx, frame, { view: ISO, scale, ox, oy });
   }
 }

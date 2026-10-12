@@ -30,6 +30,8 @@ body {
 #stage { position: fixed; inset: 0; display: block; touch-action: none; cursor: crosshair; }
 #stage.pan { cursor: grab; }
 #stage.panning { cursor: grabbing; }
+#stage.grab { cursor: grab; }
+#stage.grab.dragging { cursor: grabbing; }
 .notes-layer { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
 
 /* ── panels ──────────────────────────────────────────────────────────── */

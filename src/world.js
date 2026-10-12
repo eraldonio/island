@@ -21,15 +21,19 @@ const ckey = (cx, cy) => cx + ':' + cy;
 const tkey = (x, y) => x + ',' + y;
 const lkey = (x, y, z) => (x & 15) | ((y & 15) << 4) | (z << 8);
 
+/** The undoable state of a placed model: where it stands and which way it faces. */
+const propState = (p) => ({ x: p.x, y: p.y, z: p.z, rot: p.rot | 0 });
+
 export class World {
   constructor() {
     this.chunks = new Map();   // "cx:cy" -> { cx, cy, data: Map<localKey, matId> }
     this.tops = new Map();     // "x,y"   -> highest z (for column ops)
     this.notes = [];
-    this.props = [];          // placed models: { id, model, x, y, z }
+    this.props = [];          // placed models: { id, model, x, y, z, rot }
     this.undoStack = [];
     this.redoStack = [];
     this.stroke = null;
+    this.propDrag = null;     // { id, before } while a model is being dragged
     this.count = 0;
     this.rev = 0;              // bumped on any voxel change (geometry caches)
   }
@@ -187,6 +191,11 @@ export class World {
         if (back) this.props.splice(Math.min(cmd.index, this.props.length), 0, cmd.prop);
         else this._detachProp(cmd.prop.id);
         break;
+      case 'prop-move': {
+        const p = this.prop(cmd.id);
+        if (p) Object.assign(p, back ? cmd.before : cmd.after);
+        break;
+      }
     }
   }
 
@@ -199,9 +208,11 @@ export class World {
 
   /**
    * A model is placed as a prop: the block column it stands on is snapped to the
-   * grid, while the model keeps its own mesh, centred in the blocks it claims.
+   * grid, while the model keeps its own mesh, centred in the blocks it claims and
+   * facing whichever quarter turn `rot` names.
    */
   addProp(prop) {
+    prop.rot = prop.rot | 0;
     this.props.push(prop);
     this._commit({ kind: 'prop-add', prop });
   }
@@ -211,6 +222,49 @@ export class World {
     if (i < 0) return;
     const [prop] = this.props.splice(i, 1);
     this._commit({ kind: 'prop-del', prop, index: i });
+  }
+
+  prop(id) { return this.props.find((p) => p.id === id); }
+
+  /**
+   * Move and/or turn a placed model — one undoable step, or a piece of one while
+   * a drag is open. `at` carries any of x, y, z and rot; the rest is kept.
+   */
+  moveProp(id, at) {
+    const prop = this.prop(id);
+    if (!prop) return false;
+    const before = propState(prop);
+    const after = {
+      x: at.x ?? before.x,
+      y: at.y ?? before.y,
+      z: at.z ?? before.z,
+      rot: at.rot ?? before.rot,
+    };
+    if (after.x === before.x && after.y === before.y && after.z === before.z && after.rot === before.rot) return false;
+    Object.assign(prop, after);
+    this.rev++;
+    if (this.propDrag && this.propDrag.id === id) return true;   // folded in at endPropDrag
+    this._commit({ kind: 'prop-move', id, before, after });
+    return true;
+  }
+
+  /** Open a drag: every `moveProp` until `endPropDrag` becomes one undo step. */
+  beginPropDrag(id) {
+    const prop = this.prop(id);
+    this.propDrag = prop ? { id, before: propState(prop) } : null;
+  }
+
+  endPropDrag() {
+    const drag = this.propDrag;
+    this.propDrag = null;
+    if (!drag) return false;
+    const prop = this.prop(drag.id);
+    if (!prop) return false;
+    const after = propState(prop);
+    const { before } = drag;
+    if (after.x === before.x && after.y === before.y && after.z === before.z && after.rot === before.rot) return false;
+    this._commit({ kind: 'prop-move', id: drag.id, before, after });
+    return true;
   }
 
   /* ── notes ─────────────────────────────────────────────────────────── */
@@ -259,7 +313,7 @@ export class World {
       version: 3,
       voxels,
       notes: this.notes.map((n) => ({ id: n.id, x: n.x, y: n.y, w: n.w, h: n.h, color: n.color, html: n.html })),
-      props: this.props.map((p) => ({ id: p.id, model: p.model, x: p.x, y: p.y, z: p.z })),
+      props: this.props.map((p) => ({ id: p.id, model: p.model, x: p.x, y: p.y, z: p.z, rot: p.rot | 0 })),
     };
   }
 
@@ -284,6 +338,7 @@ export class World {
         x: Math.round(Number(p.x) || 0),
         y: Math.round(Number(p.y) || 0),
         z: Math.round(Number(p.z) || 0),
+        rot: ((Math.round(Number(p.rot) || 0) % 4) + 4) % 4,
       });
     }
     this.rev++;

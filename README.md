@@ -27,6 +27,8 @@ which browsers refuse to load from the filesystem.
 | Build / dig / paint / note / place / pan | `B` `D` `P` `N` `M` `H` |
 | Place a model | `M` (or the place tool) opens the gallery, pick a prefab, then click the world: it claims its own whole-block footprint, centred on that column and resting on its surface |
 | Remove a placed model | dig it (undo brings it back) |
+| Move a placed model | `G` (or the move tool), then drag it: it keeps its place under the pointer, snaps to whole blocks and rides the surface it lands on — the whole drag is one undo step |
+| Turn a placed model | `R` / `Shift+R` — a quarter turn about the footprint's centre, so a model that is not square across shifts by at most half a block to keep its footprint on the grid |
 | Pick a material | `1` … `9` |
 | Brush size (1×1, 3×3, 5×5) | `[` `]` |
 | Place a note | the note tool, or `Shift`+click with any tool |
@@ -133,24 +135,27 @@ dome, tube, log, roof, ring) rather than a hand-written vertex list, which keeps
 the shapes readable and the file short. Sizes are proportional on purpose: the
 duck is about one block, the house about four.
 
-The map grid is used only for *placement*: `modelSize()` reports how many whole
-blocks a model claims (`ceil` of its bounding box), the mesh is centred inside
-that footprint and rests on the clicked column's surface, and the hover ghost
-shows exactly those blocks. Nothing about the map's voxel size leaks into a
-shape, and a model is never cut to the grid.
+The map grid is used only for *placement*: `modelSize(model, rot)` reports how
+many whole blocks a model claims at that quarter turn (`ceil` of the frame's
+bounding box), the mesh is centred inside that footprint and rests on the clicked
+column's surface, and the hover ghost shows exactly those blocks. Nothing about
+the map's voxel size leaks into a shape, and a model is never cut to the grid.
 
-Placed models are **props**, not voxels: `{ id, model, x, y, z }` — a model id
-plus the block column it stands on. The renderer projects each prop's faces
+Placed models are **props**, not voxels: `{ id, model, x, y, z, rot }` — a model
+id, the block column it stands on and which quarter turn it faces (saves written
+before `rot` existed load as turn 0). The renderer projects each prop's faces
 through the same `U`, `V`, `W` basis as everything else, culls the ones that face
 away from the camera, and gives every face its own painter key, so a hill in
 front of a model covers exactly the part it overlaps. Faces are flat-shaded by
 their normal — the diffuse term against a fixed light, quantised to sixteen tones
 and cached per palette colour — which is what makes a ball of facets read as a
-low-poly sphere. A door or a window is a cell of the wall rather than a patch
-laid on it, because a coplanar patch sorts *behind* the wall it sits on and would
-never be seen. Placement and removal are single undoable steps — dig a model to
-take it away. The gallery draws the same geometry with a static painter that
-shares the renderer's face maths.
+low-poly sphere; a turned model is shaded afresh from the turned normals, so the
+light stays where it is. A door or a window is a cell of the wall rather than a
+patch laid on it, because a coplanar patch sorts *behind* the wall it sits on and
+would never be seen. Placement and removal are single undoable steps — dig a
+model to take it away — and so are a drag (however far it goes) and a quarter
+turn. The gallery draws the same geometry with a static painter that shares the
+renderer's face maths.
 
 **Undo/redo** is a command stack of edits (`before`/`after` per voxel, or a note
 patch). A drag stroke is grouped into one command via `beginStroke`/`endStroke`,

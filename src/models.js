@@ -439,37 +439,52 @@ function house(m) {
 
 /* ── placement ───────────────────────────────────────────────────────── */
 
-/**
- * Register a model: build its mesh, drop its bounding box onto the origin, and
- * work out how many whole blocks it claims. The mesh is centred in that
- * footprint — the grid is the placement's business, not the model's — and models
- * keep their proportions, so the duck stands about a block tall and the house is
- * about four across.
- */
-function define(id, name, build) {
-  const m = new Mesh();
-  build(m);
+/** One vector turned a quarter turn about z. Exact: it only swaps and negates. */
+const turnZ = ([x, y, z]) => [y, -x, z];
 
+/**
+ * One mesh at one quarter turn: verts with their bounding box dropped on the
+ * origin, the whole blocks that box claims, and the offset that centres it
+ * inside them.
+ */
+function frame(verts, faces) {
   const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-  for (const v of m.verts) {
+  for (const v of verts) {
     for (let a = 0; a < 3; a++) {
       if (v[a] < lo[a]) lo[a] = v[a];
       if (v[a] > hi[a]) hi[a] = v[a];
     }
   }
-  for (const v of m.verts) for (let a = 0; a < 3; a++) v[a] -= lo[a];
-  for (const f of m.faces) for (let a = 0; a < 3; a++) f.c[a] -= lo[a];
-
   const span = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
   const w = Math.ceil(span[0] - 1e-6), h = Math.ceil(span[1] - 1e-6), hz = Math.ceil(span[2] - 1e-6);
-  MODELS.push({
-    id,
-    name,
-    verts: m.verts,
-    faces: m.faces,
+  return {
+    verts: verts.map((v) => [v[0] - lo[0], v[1] - lo[1], v[2] - lo[2]]),
+    faces: faces.map((f) => ({ v: f.v, mat: f.mat, n: f.n, c: [f.c[0] - lo[0], f.c[1] - lo[1], f.c[2] - lo[2]] })),
     size: { w, h, hz },
     offset: { x: (w - span[0]) / 2, y: (h - span[1]) / 2 },
-  });
+  };
+}
+
+/**
+ * Register a model: build its mesh, bake its four quarter turns, and work out
+ * how many whole blocks each one claims. The mesh is centred in that footprint —
+ * the grid is the placement's business, not the model's — and models keep their
+ * proportions, so the duck stands about a block tall and the house is about four
+ * across. A rotation about z only swaps and negates coordinates, so the frames
+ * are exact and a placed model can be turned without re-deriving anything.
+ */
+function define(id, name, build) {
+  const m = new Mesh();
+  build(m);
+
+  const frames = [];
+  let verts = m.verts, faces = m.faces;
+  for (let k = 0; k < 4; k++) {
+    frames.push(frame(verts, faces));
+    verts = verts.map(turnZ);
+    faces = faces.map((f) => ({ v: f.v, mat: f.mat, n: turnZ(f.n), c: turnZ(f.c) }));
+  }
+  MODELS.push({ id, name, frames });
 }
 
 define('duck', 'Duck', duck);
@@ -487,15 +502,15 @@ define('tree', 'Tree', tree);
 define('pine', 'Pine', pine);
 define('house', 'House', house);
 
-/** How many whole blocks a model claims when it is placed. */
-export function modelSize(model) {
-  return model.size;
+/** A model's four quarter turns, in order: index straight in by a prop's `rot`. */
+export function modelFrames(model) {
+  return model.frames;
 }
 
 /**
- * Where the model's local origin sits in the world when it is placed on the
- * block column `x, y` at level `z`: centred in its footprint, based on `z`.
+ * How many whole blocks a model claims when it is placed, at quarter turn `rot`.
+ * A model that is not square across its footprint turns its footprint with it.
  */
-export function modelOrigin(model, x, y, z) {
-  return { x: x + model.offset.x, y: y + model.offset.y, z };
+export function modelSize(model, rot = 0) {
+  return model.frames[rot & 3].size;
 }

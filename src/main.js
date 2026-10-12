@@ -20,6 +20,9 @@ const cam = renderer.cam;
 const state = { tool: 'build', mat: 0, brush: 1, space: false };
 
 let hover = null;        // voxel pick under the cursor (or null)
+let hoverProp = null;    // placed model under the cursor (move tool)
+let propDrag = null;     // { id, ox, oy, at } while a model is being dragged
+let pointerAt = { x: 0, y: 0 };   // last client point, for key-driven actions
 let frameHandle = 0;
 let saveTimer = 0;
 let editing = null;      // { id, before } while the modal editor is open
@@ -114,6 +117,32 @@ function ghostVisual(hit) {
       fill: 'rgba(255,255,255,0.22)',
       outline,
       cursor: null,
+    };
+  }
+
+  if (state.tool === 'grab') {
+    // The model being dragged, or the one under the cursor: either way the ghost
+    // is the footprint it claims, which is what it snaps to.
+    const prop = (propDrag && world.prop(propDrag.id)) || hoverProp;
+    const model = prop && MODELS_BY_ID.get(prop.model);
+    if (prop && model) {
+      const size = modelSize(model, prop.rot | 0);
+      return {
+        hit,
+        cells: [],
+        tile: { x: prop.x, y: prop.y, w: size.w, h: size.h, level: prop.z },
+        fill: 'rgba(255,255,255,0.30)',
+        outline,
+        cursor: null,
+      };
+    }
+    return {
+      hit,
+      cells: [],
+      tile: null,
+      fill: 'rgba(255,255,255,0.22)',
+      outline,
+      cursor: { x: hit.x, y: hit.y, z: hit.z, flat: hit.ground },
     };
   }
 
@@ -311,22 +340,31 @@ function finishStroke(save) {
 let gallery = null;
 
 /**
- * Where a stamped model lands: the block column the click targets (the
- * neighbour of a side face, so a model placed against a wall stands beside it),
- * with the model's footprint centred on that column and resting on its surface.
- * The grid decides the placement; the model keeps its own mesh, centred in the
- * footprint it claims.
+ * The block column a click targets: the neighbour of the face it hit, so a model
+ * placed against a wall stands beside it rather than inside it. A click on bare
+ * ground targets the ground cell itself.
+ */
+function columnTarget(hit) {
+  return {
+    x: hit.ground ? hit.x : hit.x + hit.nx,
+    y: hit.ground ? hit.y : hit.y + hit.ny,
+  };
+}
+
+/**
+ * Where a stamped model lands: the block column the click targets, with the
+ * model's footprint centred on it and resting on its surface. The grid decides
+ * the placement; the model keeps its own mesh, centred in the footprint it claims.
  */
 function stampTarget(hit) {
   const model = gallery && gallery.model;
   const size = model ? modelSize(model) : { w: 1, h: 1, hz: 1 };
-  const cx = hit.ground ? hit.x : hit.x + hit.nx;
-  const cy = hit.ground ? hit.y : hit.y + hit.ny;
+  const col = columnTarget(hit);
   return {
     size,
-    x: cx - ((size.w - 1) >> 1),
-    y: cy - ((size.h - 1) >> 1),
-    z: world.surfaceUnder(cx, cy, 1, 1),
+    x: col.x - ((size.w - 1) >> 1),
+    y: col.y - ((size.h - 1) >> 1),
+    z: world.surfaceUnder(col.x, col.y, 1, 1),
   };
 }
 
@@ -360,7 +398,7 @@ function propAt(clientX, clientY) {
   for (const prop of world.props) {
     const model = MODELS_BY_ID.get(prop.model);
     if (!model) continue;
-    const s = modelSize(model);
+    const s = modelSize(model, prop.rot | 0);
     const lo = { x: prop.x, y: prop.y, z: prop.z };
     const hi = { x: prop.x + s.w, y: prop.y + s.h, z: prop.z + s.hz };
     let t0 = 0;
@@ -388,6 +426,83 @@ function propAt(clientX, clientY) {
   return front >= depthOf(hit.x, hit.y, hit.z) - 1e-6 ? best : null;
 }
 
+/**
+ * A model's footprint after a quarter turn, kept where it stands. The size delta
+ * is halved *toward zero*, so the footprint's centre stays within half a block of
+ * where it was and — because trunc(-a) === -trunc(a) — the same turn back lands
+ * on exactly the block it started on. Four turns never walk a model. The level is
+ * re-derived, because a turned footprint can cover different ground.
+ */
+function turned(model, prop, rot) {
+  const from = modelSize(model, prop.rot | 0);
+  const to = modelSize(model, rot);
+  const x = prop.x + Math.trunc((from.w - to.w) / 2);
+  const y = prop.y + Math.trunc((from.h - to.h) / 2);
+  return { x, y, z: world.surfaceUnder(x, y, to.w, to.h), rot };
+}
+
+/** Turn the model under the cursor a quarter turn (the other way for dir -1). */
+function rotatePropAt(clientX, clientY, dir) {
+  const prop = propAt(clientX, clientY);
+  if (!prop) return false;
+  const model = MODELS_BY_ID.get(prop.model);
+  if (!model) return false;
+  const rot = ((prop.rot | 0) + dir + 4) & 3;
+  if (!world.moveProp(prop.id, turned(model, prop, rot))) return false;
+  invalidate();
+  requestSave();
+  return true;
+}
+
+/**
+ * Pick a model up: remember the block offset between the cursor and the model's
+ * footprint corner, so it keeps its place under the pointer instead of jumping
+ * to it, and fold the whole drag into one undo step.
+ */
+function startPropDrag(e) {
+  const prop = propAt(e.clientX, e.clientY);
+  if (!prop) return false;
+  const hit = pickAt(e.clientX, e.clientY);
+  const col = columnTarget(hit);
+  propDrag = { id: prop.id, ox: prop.x - col.x, oy: prop.y - col.y, at: prop.x + ',' + prop.y };
+  world.beginPropDrag(prop.id);
+  mode = 'grab';
+  canvas.setPointerCapture(e.pointerId);
+  canvas.classList.add('dragging');
+  hoverProp = prop;
+  return true;
+}
+
+/** One move per block the cursor enters, riding whatever surface it lands on. */
+function dragPropAt(e) {
+  const prop = world.prop(propDrag.id);
+  const model = prop && MODELS_BY_ID.get(prop.model);
+  if (!model) return;
+  hover = pickAt(e.clientX, e.clientY);
+  const col = columnTarget(hover);
+  const x = col.x + propDrag.ox;
+  const y = col.y + propDrag.oy;
+  const key = x + ',' + y;
+  if (key === propDrag.at) { invalidate(); return; }    // holding still moves nothing
+  propDrag.at = key;
+  const size = modelSize(model, prop.rot | 0);
+  world.moveProp(prop.id, { x, y, z: world.surfaceUnder(x, y, size.w, size.h) });
+  hoverProp = prop;
+  invalidate();
+}
+
+function finishPropDrag(save) {
+  if (mode !== 'grab') return;
+  canvas.classList.remove('dragging');
+  if (propDrag) {
+    world.endPropDrag();
+    propDrag = null;
+    if (save) requestSave();
+  }
+  mode = null;
+  invalidate();
+}
+
 function pinchState() {
   const [a, b] = [...pointers.values()];
   return {
@@ -406,6 +521,7 @@ canvas.addEventListener('pointerdown', (e) => {
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointers.size === 2) {
       finishStroke(true);
+      finishPropDrag(true);
       pinch = pinchState();
       return;
     }
@@ -429,6 +545,10 @@ canvas.addEventListener('pointerdown', (e) => {
     placeStamp(pickAt(e.clientX, e.clientY));
     return;
   }
+  if (state.tool === 'grab') {
+    startPropDrag(e);
+    return;
+  }
   // Digging a placed model takes it away; undo brings it back.
   if (state.tool === 'dig') {
     const prop = propAt(e.clientX, e.clientY);
@@ -444,6 +564,7 @@ canvas.addEventListener('pointerdown', (e) => {
 
 canvas.addEventListener('pointermove', (e) => {
   if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  pointerAt = { x: e.clientX, y: e.clientY };
 
   if (pinch && pointers.size === 2) {
     const now = pinchState();
@@ -471,7 +592,13 @@ canvas.addEventListener('pointermove', (e) => {
     return;
   }
 
+  if (mode === 'grab') {
+    dragPropAt(e);
+    return;
+  }
+
   hover = pickAt(e.clientX, e.clientY);
+  hoverProp = state.tool === 'grab' ? propAt(e.clientX, e.clientY) : null;
   invalidate();
 });
 
@@ -485,6 +612,10 @@ function onUp(e) {
     mode = null;
     pan = null;
     requestSave();
+    return;
+  }
+  if (mode === 'grab') {
+    finishPropDrag(true);
     return;
   }
   if (mode === 'sculpt') {
@@ -546,7 +677,7 @@ function createNote(hit) {
 
 /* ── toolbar / status ────────────────────────────────────────────────── */
 
-const TOOL_LABEL = { build: 'Build', dig: 'Dig', paint: 'Paint', note: 'Note', pan: 'Pan', stamp: 'Place' };
+const TOOL_LABEL = { build: 'Build', dig: 'Dig', paint: 'Paint', note: 'Note', pan: 'Pan', stamp: 'Place', grab: 'Move' };
 
 function setText(el, str) {
   if (el.textContent !== str) el.textContent = str;
@@ -558,6 +689,11 @@ function setTool(tool) {
     b.classList.toggle('active', b.dataset.tool === tool);
   }
   canvas.classList.toggle('pan', tool === 'pan');
+  canvas.classList.toggle('grab', tool === 'grab');
+  if (tool !== 'grab') {
+    if (propDrag) finishPropDrag(true);   // a tool switch ends a drag, as it commits it
+    hoverProp = null;
+  }
   if (gallery) gallery.show(tool === 'stamp');
   invalidate();
 }
@@ -801,6 +937,12 @@ window.addEventListener('keydown', (e) => {
     case 'n': case 'N': setTool('note'); return;
     case 'h': case 'H': setTool('pan'); return;
     case 'm': case 'M': setTool('stamp'); return;
+    case 'g': case 'G': setTool('grab'); return;
+    case 'r': case 'R': {
+      // Turn the model under the cursor a quarter turn; Shift turns it back.
+      if (!e.repeat) rotatePropAt(pointerAt.x, pointerAt.y, e.shiftKey ? -1 : 1);
+      return;
+    }
     case 'v': case 'V': toggleView(); return;
     case '[': setBrush(BRUSHES[Math.max(0, BRUSHES.indexOf(state.brush) - 1)]); return;
     case ']': setBrush(BRUSHES[Math.min(BRUSHES.length - 1, BRUSHES.indexOf(state.brush) + 1)]); return;
