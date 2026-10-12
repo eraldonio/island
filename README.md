@@ -25,8 +25,10 @@ which browsers refuse to load from the filesystem.
 | --- | --- |
 | Apply the current tool | click, or drag — one action per block the cursor moves into (holding still does nothing more) |
 | Build / dig / paint / note / place / pan | `B` `D` `P` `N` `M` `H` |
-| Place a model | `M` (or the place tool) opens the gallery, pick a prefab, then click the world: it claims its own whole-block footprint, centred on that column and resting on its surface |
+| Place a model | `M` (or the place tool) opens the gallery — a panel of models that scrolls under the wheel once the list is longer than the screen — pick a prefab, then click the world: it claims its own whole-block footprint, centred on that column and resting on its surface |
 | Remove a placed model | dig it (undo brings it back) |
+| Move a placed model | `G` (or the move tool), then drag it: it keeps its place under the pointer, snaps to whole blocks and rides the surface it lands on — the whole drag is one undo step |
+| Turn a placed model | `R` / `Shift+R` — a quarter turn about the footprint's centre, so a model that is not square across shifts by at most half a block to keep its footprint on the grid |
 | Pick a material | `1` … `9` |
 | Brush size (1×1, 3×3, 5×5) | `[` `]` |
 | Place a note | the note tool, or `Shift`+click with any tool — the tool then switches to pan, so the next drag moves the world instead of dropping another note |
@@ -137,25 +139,41 @@ disk or `localStorage`.
 
 **Prefab models.** `src/models.js` is a small library of low-poly models (tree,
 pine, bush, house, duck, boat, boulder, cactus, well, campfire, mushroom,
-snowman, ruins). Each is authored at its **own sub-block resolution** — a model
-stores mini-voxels plus a `res` (mini-voxels per map block), so a duck and a
-house are built from voxels of the same visual size but claim very different
-amounts of ground. Sizes are proportional on purpose: the duck is about one
-block, the house about four.
+snowman, ruins). Each is a **polygon mesh** — vertices in block units, faces of
+three or four of them — grown from a handful of faceted primitives (box, ball,
+dome, tube, log, roof, ring) rather than a hand-written vertex list, which keeps
+the shapes readable and the file short. Sizes are proportional on purpose: the
+duck is about one block, the house about four.
 
-The map grid is used only for *placement*: `modelSize()` derives how many whole
-blocks a model claims (`ceil(bbox / res)`), the model is centred inside that
-footprint and rests on the clicked column's surface, and the hover ghost shows
-exactly those blocks. Nothing about the map's voxel size leaks into the model's
-shape.
+`src/models.pack.js` adds ten more, baked from the CC0 **Kenney Nature Kit** by
+`tools/import-pack.mjs` — a one-off converter (OBJ + MTL in, block-unit triangles
+out) rather than a loader, so the app still ships no dependencies and loads no
+model formats at runtime. A face there is one flat colour taken from its
+material, because the renderer has no textures; imported models keep those
+colours rather than the world's palette, so an imported tree stands out against
+the terrain. See `CREDITS.md` for provenance and licence.
 
-Placed models are **props**, not voxels: `{ id, model, x, y, z }` — a model id
-plus the block column it stands on. The renderer expands each prop into its
-mini-boxes (scaled through the same `U`, `V`, `W` basis as everything else) and
-gives every box its own painter key, so a block in front of a model covers
-exactly the part it overlaps. Placement and removal are single undoable steps —
-dig a model to take it away. The gallery draws the same geometry with a static
-painter that shares the renderer's face maths.
+The map grid is used only for *placement*: `modelSize(model, rot)` reports how
+many whole blocks a model claims at that quarter turn (`ceil` of the frame's
+bounding box), the mesh is centred inside that footprint and rests on the clicked
+column's surface, and the hover ghost shows exactly those blocks. Nothing about
+the map's voxel size leaks into a shape, and a model is never cut to the grid.
+
+Placed models are **props**, not voxels: `{ id, model, x, y, z, rot }` — a model
+id, the block column it stands on and which quarter turn it faces (saves written
+before `rot` existed load as turn 0). The renderer projects each prop's faces
+through the same `U`, `V`, `W` basis as everything else, culls the ones that face
+away from the camera, and gives every face its own painter key, so a hill in
+front of a model covers exactly the part it overlaps. Faces are flat-shaded by
+their normal — the diffuse term against a fixed light, quantised to sixteen tones
+and cached per palette colour — which is what makes a ball of facets read as a
+low-poly sphere; a turned model is shaded afresh from the turned normals, so the
+light stays where it is. A door or a window is a cell of the wall rather than a
+patch laid on it, because a coplanar patch sorts *behind* the wall it sits on and
+would never be seen. Placement and removal are single undoable steps — dig a
+model to take it away — and so are a drag (however far it goes) and a quarter
+turn. The gallery draws the same geometry with a static painter that shares the
+renderer's face maths.
 
 **Undo/redo** is a command stack of edits (`before`/`after` per voxel, or a note
 patch). A drag stroke is grouped into one command via `beginStroke`/`endStroke`,
@@ -169,13 +187,16 @@ index.html      markup: canvas, toolbar, status, editor + help modals
 styles.css      dark UI theme, sticky-note and modal styling
 src/iso.js      projection, ground-plane raycast, constants
 src/world.js    chunked voxel store, notes, undo/redo, palette, starter island
-src/render.js   canvas renderer: culling, painter sort, note tiles, hover ghost
+src/render.js   canvas renderer: culling, painter sort, flat-shaded model faces,
+                note tiles, hover ghost
 src/tools.js    what a click does (build/dig/paint footprints per face)
 src/notes.js    note tiles: warped DOM ink, resize handles, proximity hover
-src/models.js   the low-poly prefab library (voxel cells + footprint helpers)
+src/models.js   the low-poly prefab library (polygon meshes + placement helpers)
+src/models.pack.js  models baked from CC0 packs (generated, do not edit)
 src/gallery.js  the model panel: cards, live isometric previews, selection
 src/store.js    localStorage autosave, JSON export/import, v1 migration
 src/main.js     wiring: input, camera, shortcuts, editor modal, status
+tools/import-pack.mjs  one-off pack converter (run by hand, not at runtime)
 ```
 
 ## Data, saving, scripting
@@ -212,9 +233,9 @@ frame, so a save only stores which model and where.
 * A tile is rigid: it rests on the highest block under its footprint, so on very
   uneven ground it bridges dips. Terrain in front still occludes it, and a note
   that ends up mostly hidden fades to a ghost rather than disappearing.
-* A placed model claims whole blocks but draws at its own resolution, so a small
-  model leaves most of its claimed block empty. Its bounding box is what occludes
-  and what a dig removes, not the fine geometry.
+* A placed model claims whole blocks but draws its own true shape, so a small
+  model leaves most of its claimed blocks empty. Its bounding box is what occludes
+  and what a dig removes, not the mesh.
 * Text capacity is set by the footprint and the preview size — at the default
   9 px, roughly three characters per block; `−` fits more, `+` less. Long notes
   want a bigger tile (drag a corner) or the pop-up editor, which always shows

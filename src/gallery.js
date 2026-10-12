@@ -1,10 +1,9 @@
 // Model gallery: the panel of low-poly prefabs, each previewed with the same
 // projection and palette the world uses, so a card shows what you will get.
 
-import { MODELS, modelSize, modelBoxes } from './models.js';
-import { paintBoxes, shade } from './render.js';
+import { MODELS, modelFrames } from './models.js';
+import { paintModel } from './render.js';
 import { project, ISO } from './iso.js';
-import { PALETTE } from './world.js';
 
 const THUMB = 62;      // preview size in css px
 const PAD = 7;         // breathing room inside the preview
@@ -14,11 +13,6 @@ export class Gallery {
     this.root = root;
     this.onPick = onPick;
     this.id = MODELS.length ? MODELS[0].id : null;
-    this.colors = PALETTE.map((p) => ({
-      top: p.color,
-      right: shade(p.color, 0.79),
-      left: shade(p.color, 0.6),
-    }));
     this.cards = new Map();
     this.build();
   }
@@ -31,7 +25,7 @@ export class Gallery {
       card.type = 'button';
       card.className = 'mcard';
       card.dataset.id = model.id;
-      card.title = model.name;
+      card.title = model.source ? `${model.name} — ${model.source}` : model.name;
       const canvas = document.createElement('canvas');
       const name = document.createElement('span');
       name.className = 'mname';
@@ -70,24 +64,24 @@ export class Gallery {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, THUMB, THUMB);
 
-    const { w, h, hz } = modelSize(model);
-
-    const corners = [];
-    for (const a of [0, w]) {
-      for (const b of [0, h]) {
-        for (const c of [0, hz]) corners.push(project(a, b, c, ISO));
-      }
+    // Fit and centre on the model's own world-space bounds: the verts of its
+    // first quarter turn, placed by the same origin offset the painters use.
+    const frame = modelFrames(model)[0];
+    const o = { x: frame.offset.x, y: frame.offset.y, z: 0 };
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const p of frame.verts) {
+      const q = project(o.x + p[0], o.y + p[1], o.z + p[2], ISO);
+      if (q.x < minX) minX = q.x;
+      if (q.x > maxX) maxX = q.x;
+      if (q.y < minY) minY = q.y;
+      if (q.y > maxY) maxY = q.y;
     }
-    const xs = corners.map((p) => p.x);
-    const ys = corners.map((p) => p.y);
-    const minX = Math.min(...xs), maxX = Math.max(...xs);
-    const minY = Math.min(...ys), maxY = Math.max(...ys);
-    const spanX = Math.max(1, maxX - minX);
-    const spanY = Math.max(1, maxY - minY);
+    const spanX = Math.max(1e-6, maxX - minX);
+    const spanY = Math.max(1e-6, maxY - minY);
     const scale = Math.min((THUMB - 2 * PAD) / spanX, (THUMB - 2 * PAD) / spanY);
     const ox = (THUMB - spanX * scale) / 2 - minX * scale;
     const oy = (THUMB - spanY * scale) / 2 - minY * scale;
 
-    paintBoxes(ctx, modelBoxes(model, 0, 0, 0), { view: ISO, scale, ox, oy, colors: this.colors });
+    paintModel(ctx, frame, { view: ISO, scale, ox, oy });
   }
 }
