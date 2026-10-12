@@ -8,7 +8,7 @@
 // correctly — including the ones where you see the far sides of blocks.
 
 import { Z_MIN, Z_MAX, CHUNK, project, unproject, ISO } from './iso.js';
-import { PALETTE, PAPER } from './world.js';
+import { PALETTE, PAPER, CHAT_PAPER } from './world.js';
 import { MODELS, modelFrames } from './models.js';
 
 const MODELS_BY_ID = new Map(MODELS.map((m) => [m.id, m]));
@@ -375,6 +375,31 @@ export class Renderer {
       if (++n >= KEY_MASK) break;
     }
 
+    // Harness tiles are the same kind of object as notes: a ground quad in the
+    // painter order, so terrain in front of one covers it.
+    const chats = world.chats;
+    for (let ci = 0; ci < chats.length; ci++) {
+      const chat = chats[ci];
+      const L = world.surfaceUnder(chat.x, chat.y, chat.w, chat.h);
+      const a = this.toScreen(chat.x, chat.y, L);
+      const bx = a.x + U.x * chat.w;
+      const by = a.y + U.y * chat.w;
+      const cx = bx + V.x * chat.h;
+      const cy = by + V.y * chat.h;
+      const dx = a.x + V.x * chat.h;
+      const dy = a.y + V.y * chat.h;
+      if (Math.max(a.x, bx, cx, dx) < -2 || Math.min(a.x, bx, cx, dx) > W_ + 2) continue;
+      if (Math.max(a.y, by, cy, dy) < -2 || Math.min(a.y, by, cy, dy) > H_ + 2) continue;
+
+      g.xs.push(chat.x); g.ys.push(chat.y); g.zs.push(L);
+      g.mats.push(0); g.masks.push(0);
+      g.kinds.push(4); g.notes.push(ci);
+      g.ax.push(a.x); g.ay.push(a.y);
+      g.fstart.push(0); g.fcount.push(0); g.fcol.push(0); g.fstep.push(0);
+      g.keys.push(depthKey(chat.x + chat.w, chat.y + chat.h, L, v, n));
+      if (++n >= KEY_MASK) break;
+    }
+
     // Placed models: each face is projected and drawn as its own flat-shaded
     // polygon, keyed by its centroid so it sorts against the terrain exactly
     // where it stands. The prop's bounding box is culled once, then every face
@@ -457,6 +482,7 @@ export class Renderer {
       const k = keys[i] & KEY_MASK;
       const kind = g.kinds[k];
       if (kind === 1) { this.drawNoteTile(ctx, this.world.notes[g.notes[k]], g.zs[k], U, V); continue; }
+      if (kind === 4) { this.drawChatTile(ctx, this.world.chats[g.notes[k]], g.zs[k], U, V); continue; }
 
       if (kind === 3) {                           // a placed model's face
         const c = this.toneFor(g.fcol[k], g.fstep[k]);
@@ -499,18 +525,31 @@ export class Renderer {
     }
   }
 
-  /* ── notes ─────────────────────────────────────────────────────────── */
+  /* ── notes and harness tiles ───────────────────────────────────────── */
 
   /** Paper of a note tile: a solid slab lying on the surface. */
   drawNoteTile(ctx, note, level, U, V) {
-    const a = this.toScreen(note.x, note.y, level);
-    const b = { x: a.x + U.x * note.w, y: a.y + U.y * note.w };
-    const c = { x: b.x + V.x * note.h, y: b.y + V.y * note.h };
-    const d = { x: a.x + V.x * note.h, y: a.y + V.y * note.h };
     const paper = PAPER[((note.color | 0) % PAPER.length + PAPER.length) % PAPER.length];
+    this.drawTile(ctx, note, level, U, V, paper);
+  }
 
-    // Thickness: the same quad pushed toward the viewer, so only the two
-    // camera-facing rims show and the paper reads as a slab, not a decal.
+  /** The slab of a harness tile, drawn in the same painter order. */
+  drawChatTile(ctx, chat, level, U, V) {
+    const paper = CHAT_PAPER[((chat.color | 0) % CHAT_PAPER.length + CHAT_PAPER.length) % CHAT_PAPER.length];
+    this.drawTile(ctx, chat, level, U, V, paper);
+  }
+
+  /**
+   * A tile is a w*h block quad lying on the surface. Thickness: the same quad
+   * pushed toward the viewer, so only the two camera-facing rims show and the
+   * tile reads as a slab, not a decal.
+   */
+  drawTile(ctx, tile, level, U, V, paper) {
+    const a = this.toScreen(tile.x, tile.y, level);
+    const b = { x: a.x + U.x * tile.w, y: a.y + U.y * tile.w };
+    const c = { x: b.x + V.x * tile.h, y: b.y + V.y * tile.h };
+    const d = { x: a.x + V.x * tile.h, y: a.y + V.y * tile.h };
+
     ctx.fillStyle = shade(paper, 0.6);
     ctx.beginPath();
     ctx.moveTo(a.x + 1, a.y + 3);

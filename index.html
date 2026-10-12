@@ -10,6 +10,7 @@
 
 <canvas id="stage"></canvas>
 <div id="notes-layer" class="notes-layer"></div>
+<div id="chats-layer" class="notes-layer"></div>
 
 <!-- ── toolbar ─────────────────────────────────────────────────────────── -->
 <div id="toolbar" class="panel" role="toolbar" aria-label="Tools">
@@ -28,6 +29,9 @@
     </button>
     <button class="tbtn" data-tool="pan" title="Pan — drag to move the world (H, or hold Space)">
       <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5v15M2.5 10h15"/><path d="M10 2.5 7.6 5.2M10 2.5l2.4 2.7M10 17.5l-2.4-2.7M10 17.5l2.4-2.7M2.5 10l2.7-2.4M2.5 10l2.7 2.4M17.5 10l-2.7-2.4M17.5 10l-2.7 2.4"/></svg>
+    </button>
+    <button class="tbtn" data-tool="harness" title="Harness — drop a live omp chat tile on the ground (K)">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4.2" width="14" height="10" rx="2"/><path d="M6.5 7.6h7M6.5 10.6h4"/><path d="M8 16.6h4"/></svg>
     </button>
     <button class="tbtn" data-tool="stamp" title="Place a model from the gallery (M)">
       <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.2 15.4 6v6.4L10 15.2 4.6 12.4V6z"/><path d="M4.6 6 10 8.8l5.4-2.8M10 8.8v6.4"/><path d="M6 16.6h8"/></svg>
@@ -80,6 +84,28 @@
   <button class="abtn" id="a-help" title="Help (?)">?</button>
 </div>
 
+<!-- ── harness chat window ─────────────────────────────────────────────── -->
+<div id="chat" class="backdrop" hidden>
+  <div class="chatwin" role="dialog" aria-modal="true" aria-label="omp harness">
+    <div class="crow ctop">
+      <span class="cdot" id="chat-dot"></span>
+      <span class="ctitle">omp</span>
+      <span class="cstate" id="chat-state"></span>
+      <span class="cmodel muted" id="chat-model"></span>
+      <span class="grow"></span>
+      <button class="abtn" id="chat-stop" title="Stop the current turn (abort)">■</button>
+      <button class="abtn" id="chat-new" title="Forget this session and start a fresh one">⟲</button>
+      <button class="abtn" id="chat-close" title="Close (Esc)">✕</button>
+    </div>
+    <div class="clog" id="chat-log"></div>
+    <div class="cdialog" id="chat-dialog" hidden></div>
+    <div class="crow cbottom">
+      <textarea id="chat-input" rows="1" placeholder="Message omp…  (Enter sends, Shift+Enter is a newline)"></textarea>
+      <button class="btn primary" id="chat-send">Send</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── note editor (WYSIWYG) ───────────────────────────────────────────── -->
 <div id="editor" class="backdrop" hidden>
   <div class="editor" role="dialog" aria-modal="true" aria-label="Note editor">
@@ -126,7 +152,7 @@
         <ul>
           <li><b>Click / drag</b> — apply the current tool; a drag acts once per block
               the cursor moves into, so holding still adds nothing more</li>
-          <li><b>B</b> build · <b>D</b> dig · <b>P</b> paint · <b>N</b> note · <b>M</b> place a model · <b>G</b> move · <b>H</b> pan</li>
+          <li><b>B</b> build · <b>D</b> dig · <b>P</b> paint · <b>N</b> note · <b>K</b> harness · <b>M</b> place a model · <b>G</b> move · <b>H</b> pan</li>
           <li><b>M</b> opens the model gallery: pick a low-poly prefab (tree, house,
               duck…), then click the world — it claims its own blocks, resting on the
               surface. Models keep their proportions, so the duck really is smaller
@@ -152,6 +178,28 @@
           <li><b>spin</b> / <b>tilt</b> sliders — the same orbit, by exact degrees;
               straight down, where note writing reads head-on</li>
           <li><b>V</b> — jump between the isometric look and straight down</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Harness</h3>
+        <ul>
+          <li><b>K</b> (or the harness tool) — drop a live <b>omp</b> chat tile on the ground.
+              The world view shows the answer streaming onto the tile as it is written</li>
+          <li><b>Click the tile</b> — open the chat: type a message, read the reply and every
+              tool call streaming in, or stop a turn with <b>■</b></li>
+          <li>Each tile is its own real <code>omp</code> session, rooted in this project and
+              agentic — it can read, run and edit, like the terminal harness</li>
+          <li><b>⟲</b> in the chat starts a fresh session · <b>×</b> removes the tile
+              (undo brings it back)</li>
+          <li><b>●</b> cycles the slab colour · <b>−</b> / <b>+</b> set the preview text
+              size, and dragging a corner resizes the tile — the same per-tile knobs a
+              note has, so the tail is typeset to fit instead of overflowing</li>
+          <li>The bar across the tile's top is its status: <b>idle</b>, <b>working</b>,
+              <b>done</b>, <b>waiting for input</b>, <b>error</b> or <b>offline</b>. If omp
+              is blocked on a question it is shown in the chat window — the tile says
+              <b>waiting for input</b> until you answer</li>
+          <li>Tiles need the dev server (<code>python3 serve.py</code>), which bridges the page
+              to <code>omp</code>; a conversation survives a reload</li>
         </ul>
       </div>
       <div>

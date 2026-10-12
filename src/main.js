@@ -1,8 +1,10 @@
 // Wiring: camera, input, tools, editor modal, status, autosave.
 
-import { World, PALETTE, PAPER, seedStarter, uid, NOTE_NEW, FS_DEFAULT, clampFs } from './world.js';
+import { World, PALETTE, PAPER, CHAT_PAPER, seedStarter, uid, NOTE_NEW, FS_DEFAULT, clampFs, CHAT_NEW } from './world.js';
 import { Renderer } from './render.js';
 import { Notes, sanitizeHtml } from './notes.js';
+import { Harnesses, ChatWindow } from './harness.js';
+import { dropSession, dropAllSessions } from './omp.js';
 import { raycast, unproject, viewOf, ISO, Z_MAX, SPIN0, TILT0, TILT_MAX } from './iso.js';
 import { targetsFor, BRUSHES } from './tools.js';
 import { Gallery } from './gallery.js';
@@ -80,6 +82,83 @@ const notes = new Notes($('notes-layer'), world, {
   },
 });
 
+/* ── harness tiles and chat window ───────────────────────────────────── */
+
+/** One undoable step for a tile move or resize (mirrors commitNote). */
+function commitChat(id, before, after) {
+  const c = world.chat(id);
+  if (!c) return;
+  let changed = false;
+  for (const k of Object.keys(after)) if (before[k] !== after[k]) changed = true;
+  if (!changed) { invalidate(); return; }
+  Object.assign(c, before);
+  world.patchChat(id, after);
+  invalidate();
+  requestSave();
+}
+
+const chats = new Harnesses($('chats-layer'), world, {
+  cam: () => cam,
+  pickAt: (cx, cy) => pickAt(cx, cy),
+  onOpen: (id) => chatWindow.open(id),
+  onFocusChat: () => { hover = null; },
+  onResize: () => invalidate(),
+  onResizeEnd: (id, before, after) => commitChat(id, before, after),
+  onDrop: (id, before, after) => commitChat(id, before, after),
+  onDelete: (id) => deleteChat(id),
+  onCycleColor: (id) => {
+    const c = world.chat(id);
+    if (!c) return;
+    world.patchChat(id, { color: (c.color + 1) % CHAT_PAPER.length });
+    // The slab is drawn on the canvas, so the new colour only shows once a
+    // frame runs.
+    invalidate();
+    requestSave();
+  },
+  onFontSize: (id, delta) => {
+    const c = world.chat(id);
+    if (!c) return;
+    const fs = clampFs(clampFs(c.fs) + delta);
+    if (fs === clampFs(c.fs)) return;
+    world.patchChat(id, { fs });
+    invalidate();
+    requestSave();
+  },
+});
+
+const chatWindow = new ChatWindow($('chat'), {
+  chat: (id) => world.chat(id),
+  onClose: () => { invalidate(); requestSave(); },
+});
+
+/** Place a new harness tile: one undoable edit, then open its chat. */
+function createChat(hit) {
+  if (!hit) return;
+  const { w, h } = CHAT_NEW;
+  const chat = {
+    id: uid(),
+    x: hit.x - ((w - 1) >> 1),
+    y: hit.y - ((h - 1) >> 1),
+    w, h,
+    color: 0,
+    fs: FS_DEFAULT,
+  };
+  world.addChat(chat);
+  setTool('pan');
+  invalidate();
+  requestSave();
+  requestAnimationFrame(() => chatWindow.open(chat.id));
+}
+
+/** Remove a tile and let its omp process go; undo brings both back. */
+function deleteChat(id) {
+  if (chatWindow.isOpen && chatWindow.chat && chatWindow.chat.id === id) chatWindow.close();
+  world.removeChat(id);
+  dropSession(id);
+  invalidate();
+  requestSave();
+}
+
 /* ── picking ─────────────────────────────────────────────────────────── */
 
 // Notes decide their own hover state from the pointer, because their toolbar
@@ -87,6 +166,7 @@ const notes = new Notes($('notes-layer'), world, {
 window.addEventListener('pointermove', (e) => {
   notes.remember(e.clientX, e.clientY);
   notes.hoverAt(e.clientX, e.clientY);
+  chats.hoverAt(e.clientX, e.clientY);
 }, { passive: true });
 
 const solid = (x, y, z) => world.get(x, y, z) !== undefined;
@@ -170,6 +250,17 @@ function ghostVisual(hit) {
     return { hit, cells: [], tile, fill: 'rgba(255,214,102,0.34)', outline, cursor: null };
   }
 
+  if (state.tool === 'harness') {
+    const { w, h } = CHAT_NEW;
+    const tile = {
+      x: hit.x - ((w - 1) >> 1),
+      y: hit.y - ((h - 1) >> 1),
+      w, h,
+    };
+    tile.level = world.surfaceUnder(tile.x, tile.y, tile.w, tile.h);
+    return { hit, cells: [], tile, fill: 'rgba(86,217,160,0.26)', outline, cursor: null };
+  }
+
   const cells = targetsFor(world, hit, state.tool, state.brush);
   const fill = state.tool === 'dig' ? 'rgba(255,90,80,0.35)'
     : state.tool === 'paint' ? 'rgba(255,255,255,0.30)'
@@ -193,6 +284,7 @@ function frame() {
   renderer.hover = ghostVisual(hover);
   renderer.render();
   notes.sync(cam);
+  chats.sync(cam);
   updateStatus();
 }
 
@@ -571,6 +663,10 @@ canvas.addEventListener('pointerdown', (e) => {
     createNote(pickAt(e.clientX, e.clientY));
     return;
   }
+  if (state.tool === 'harness') {
+    createChat(pickAt(e.clientX, e.clientY));
+    return;
+  }
   if (state.tool === 'stamp') {
     placeStamp(pickAt(e.clientX, e.clientY));
     return;
@@ -742,7 +838,7 @@ function createNote(hit) {
 
 /* ── toolbar / status ────────────────────────────────────────────────── */
 
-const TOOL_LABEL = { build: 'Build', dig: 'Dig', paint: 'Paint', note: 'Note', pan: 'Pan', stamp: 'Place', grab: 'Move' };
+const TOOL_LABEL = { build: 'Build', dig: 'Dig', paint: 'Paint', note: 'Note', pan: 'Pan', stamp: 'Place', grab: 'Move', harness: 'Harness' };
 
 function setText(el, str) {
   if (el.textContent !== str) el.textContent = str;
@@ -818,7 +914,10 @@ function updateStatus() {
   setText($('st-pos'), hover ? `${hover.x}, ${hover.y} · h ${hover.ground ? 0 : hover.z + 1}` : '–');
   const nb = world.count;
   const nn = world.notes.length;
-  setText($('st-count'), `${nb} block${nb === 1 ? '' : 's'} · ${nn} note${nn === 1 ? '' : 's'}`);
+  const nc = world.chats.length;
+  let counts = `${nb} block${nb === 1 ? '' : 's'} · ${nn} note${nn === 1 ? '' : 's'}`;
+  if (nc) counts += ` · ${nc} harness${nc === 1 ? '' : 'es'}`;
+  setText($('st-count'), counts);
   setText($('st-zoom'), Math.round(cam.scale * 100) + '%');
   $('a-undo').disabled = !world.canUndo();
   $('a-redo').disabled = !world.canRedo();
@@ -885,6 +984,7 @@ function requestSave() {
 
 function closeModals() {
   if (editing) closeEditor();
+  if (chatWindow.isOpen) chatWindow.close();
   $('help').hidden = true;
 }
 
@@ -916,6 +1016,7 @@ function buildActions() {
     try {
       const data = await store.readFile(f);
       if (!confirm(`Replace the current world with "${f.name}" (${data.voxels.length} blocks, ${(data.notes || []).length} notes)?`)) return;
+      dropAllSessions();
       world.load(data);
       if (!applyCamera(data.camera)) fitView();
       invalidate();
@@ -927,6 +1028,7 @@ function buildActions() {
 
   $('a-reset').addEventListener('click', () => {
     if (!confirm('Erase every block and note? This cannot be undone.')) return;
+    dropAllSessions();
     world.load({ voxels: [], notes: [] });
     store.clear();
     fitView();
@@ -1002,6 +1104,7 @@ window.addEventListener('keydown', (e) => {
     case 'n': case 'N': setTool('note'); return;
     case 'h': case 'H': setTool('pan'); return;
     case 'm': case 'M': setTool('stamp'); return;
+    case 'k': case 'K': setTool('harness'); return;
     case 'g': case 'G': setTool('grab'); return;
     case 'r': case 'R': {
       // Turn the model under the cursor a quarter turn; Shift turns it back.
@@ -1064,4 +1167,4 @@ invalidate();
 // Scripting hook: every part of the app is reachable from the console, e.g.
 //   island.world.get(0, 0, 0)      island.cam.scale = 2
 //   island.world.apply([{ x: 0, y: 0, z: 5, mat: 2 }])
-window.island = { world, cam, state, renderer, notes, invalidate, save: () => store.save(world, cam) };
+window.island = { world, cam, state, renderer, notes, chats, chatWindow, invalidate, save: () => store.save(world, cam) };

@@ -29,6 +29,7 @@ export class World {
     this.chunks = new Map();   // "cx:cy" -> { cx, cy, data: Map<localKey, matId> }
     this.tops = new Map();     // "x,y"   -> highest z (for column ops)
     this.notes = [];
+    this.chats = [];          // harness tiles: { id, x, y, w, h }
     this.props = [];          // placed models: { id, model, x, y, z, rot }
     this.undoStack = [];
     this.redoStack = [];
@@ -184,6 +185,18 @@ export class World {
         if (n) Object.assign(n, back ? cmd.before : cmd.after);
         break;
       }
+      case 'chat-add':
+        if (back) this._detachChat(cmd.chat.id); else this.chats.push(cmd.chat);
+        break;
+      case 'chat-del':
+        if (back) this.chats.splice(Math.min(cmd.index, this.chats.length), 0, cmd.chat);
+        else this._detachChat(cmd.chat.id);
+        break;
+      case 'chat-patch': {
+        const c = this.chat(cmd.id);
+        if (c) Object.assign(c, back ? cmd.before : cmd.after);
+        break;
+      }
       case 'prop-add':
         if (back) this._detachProp(cmd.prop.id); else this.props.push(cmd.prop);
         break;
@@ -298,6 +311,37 @@ export class World {
     this._commit({ kind: 'note-patch', id, before, after: { ...patch } });
   }
 
+  /* ── harness tiles ─────────────────────────────────────────────────── */
+
+  chat(id) { return this.chats.find((c) => c.id === id); }
+
+  _detachChat(id) {
+    const i = this.chats.findIndex((c) => c.id === id);
+    if (i >= 0) this.chats.splice(i, 1);
+  }
+
+  addChat(chat) {
+    this.chats.push(chat);
+    this._commit({ kind: 'chat-add', chat });
+  }
+
+  removeChat(id) {
+    const i = this.chats.findIndex((c) => c.id === id);
+    if (i < 0) return;
+    const [chat] = this.chats.splice(i, 1);
+    this._commit({ kind: 'chat-del', chat, index: i });
+  }
+
+  /** Move or resize a harness tile as one undoable step. */
+  patchChat(id, patch) {
+    const c = this.chat(id);
+    if (!c) return;
+    const before = {};
+    for (const k of Object.keys(patch)) before[k] = c[k];
+    Object.assign(c, patch);
+    this._commit({ kind: 'chat-patch', id, before, after: { ...patch } });
+  }
+
   /* ── persistence ───────────────────────────────────────────────────── */
 
   serialize() {
@@ -310,9 +354,10 @@ export class World {
       }
     }
     return {
-      version: 3,
+      version: 4,
       voxels,
       notes: this.notes.map((n) => ({ id: n.id, x: n.x, y: n.y, w: n.w, h: n.h, color: n.color, fs: n.fs, html: n.html })),
+      chats: this.chats.map((c) => ({ id: c.id, x: c.x, y: c.y, w: c.w, h: c.h, color: c.color, fs: c.fs })),
       props: this.props.map((p) => ({ id: p.id, model: p.model, x: p.x, y: p.y, z: p.z, rot: p.rot | 0 })),
     };
   }
@@ -321,6 +366,7 @@ export class World {
     this.chunks.clear();
     this.tops.clear();
     this.notes.length = 0;
+    this.chats.length = 0;
     this.props.length = 0;
     this.undoStack.length = 0;
     this.redoStack.length = 0;
@@ -328,6 +374,7 @@ export class World {
     this.count = 0;
     for (const [x, y, z, mat] of data.voxels || []) this.set(x, y, z, mat);
     for (const n of data.notes || []) this.notes.push(normalizeNote(n));
+    for (const c of data.chats || []) this.chats.push(normalizeChat(c));
     // Unknown model ids are kept: the renderer simply skips them, which beats
     // silently dropping someone's work on load.
     for (const p of data.props || []) {
@@ -348,6 +395,12 @@ export class World {
 export const NOTE_MIN = 1;
 export const NOTE_MAX = 16;
 export const NOTE_NEW = { w: 6, h: 4 };
+
+// Harness tiles: a chat needs more room than a post-it for the stream to read.
+// They carry the same per-tile knobs as a note — a footprint, a preview text
+// size and a cycled colour — so the world view reads as one family of tiles.
+export const CHAT_NEW = { w: 9, h: 6 };
+export const CHAT_PAPER = ['#151b24', '#1e2440', '#0f2a24', '#33191d', '#2b1e3d', '#2e2a12'];
 
 // Preview text size, in tile-local px (NOTE_U per block). The default is small
 // on purpose: a tile is a post-it, and the `−`/`+` buttons in its toolbar trade
@@ -387,6 +440,23 @@ export function normalizeNote(raw) {
     color: Number(raw.color) | 0,
     fs: clampFs(raw.fs),
     html: raw.html || '',
+  };
+}
+
+/**
+ * A harness tile is just a footprint: its conversation lives in the omp session
+ * keyed by its id (under `.island/harness/<id>/` on the dev server), so a save
+ * only has to remember where the tile sits.
+ */
+export function normalizeChat(raw) {
+  return {
+    id: raw.id || uid(),
+    x: Math.round(Number(raw.x) || 0),
+    y: Math.round(Number(raw.y) || 0),
+    w: blocks(raw.w, CHAT_NEW.w),
+    h: blocks(raw.h, CHAT_NEW.h),
+    color: Number(raw.color) | 0,
+    fs: clampFs(raw.fs),
   };
 }
 

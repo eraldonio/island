@@ -16,6 +16,19 @@ python3 serve.py                 # dev server with caching disabled
 Any static file server works (`python3 -m http.server 8080`, `npx serve`, …);
 `serve.py` just sends `no-store` so edits always reload.
 
+One feature does need `serve.py`. **Harness tiles** drive a real `omp` session,
+and a page cannot spawn a process, so `serve.py` doubles as the bridge: it runs
+the local `omp` CLI (`--mode rpc`) behind `/api/omp` and streams its output back
+over SSE. That needs `omp` on `PATH` (`ISLAND_OMP` overrides the binary,
+`ISLAND_OMP_CWD` the directory it works in). It binds loopback only, and every
+mutating request must carry an `X-Island` header — a header a browser cannot set
+from another origin without a preflight this server never approves. Served by
+anything else, the tiles still place and draw; they just read
+`harness unavailable`.
+
+Sessions live in `.island/harness/<tile id>/` and are resumed with `--continue`,
+so a conversation outlives a reload (or a restart of this server).
+
 Opening `index.html` over `file://` will not work: the app uses ES modules,
 which browsers refuse to load from the filesystem.
 
@@ -24,7 +37,7 @@ which browsers refuse to load from the filesystem.
 | Action | Input |
 | --- | --- |
 | Apply the current tool | click, or drag — one action per block the cursor moves into (holding still does nothing more) |
-| Build / dig / paint / note / place / pan | `B` `D` `P` `N` `M` `H` |
+| Build / dig / paint / note / harness / place / move / pan | `B` `D` `P` `N` `K` `M` `G` `H` |
 | Place a model | `M` (or the place tool) opens the gallery — a panel of models that scrolls under the wheel once the list is longer than the screen — pick a prefab, then click the world: it claims its own whole-block footprint, centred on that column and resting on its surface |
 | Remove a placed model | dig it (undo brings it back) |
 | Move a placed model | `G` (or the move tool), then drag it: it keeps its place under the pointer, snaps to whole blocks and rides the surface it lands on — the whole drag is one undo step |
@@ -38,6 +51,12 @@ which browsers refuse to load from the filesystem.
 | Move a note | drag its `⠿` grip onto another block |
 | Cycle paper colour / delete | `●` / `×` on the note |
 | Preview text size | `−` / `+` on the note, 3…40 px in steps of 1 (per note, small at 9 by default) |
+| Place a harness tile | `K` (or the harness tool), then click the world — a live `omp` chat lands on the ground. The tile shows the answer streaming as it is written, so the world view is a readout of every running harness |
+| Open the harness chat | click the tile's slab, or its `⤢` button — a real chat: type, watch the reply and each tool call stream in, `■` to stop a turn |
+| Reset / delete a harness tile | `⟲` in the chat starts a fresh conversation for that tile; `×` on the slab removes the tile (undo brings it back) |
+| Resize / move a harness tile | the same white corner handles and `⠿` grip as a note |
+| Harness tile colour / preview size | `●` cycles the slab colour, `−` / `+` set the preview text size — the same per-tile knobs a note has, undoable like any other patch |
+| Harness tile status | the bar across the top of a tile reads the session's own state: `idle` (up, no turns yet), `working` (a turn is running), `done` (it just finished), `waiting for input` (settled — the next move is yours, or it is blocked on a dialog), `error`, `offline` |
 | Pan | `Space`+drag, right-drag, `Shift`+wheel, or the pan tool |
 | Zoom | wheel (at the cursor), `Ctrl`+wheel, `+` / `−`, or pinch on touch |
 | Orbit the camera | middle-drag, or the `spin` and `tilt` sliders: spin turns the world to any azimuth, tilt raises the camera from nearly edge-on to straight down. Straight down with spin 0 makes note writing read head-on |
@@ -137,6 +156,49 @@ stored. Pasted HTML is passed through a tag/attribute whitelist
 (`sanitizeHtml`) before it ever reaches the model, as is anything loaded from
 disk or `localStorage`.
 
+**Harness tiles are notes that talk.** A harness tile is the same `w × h` ground
+footprint as a note — same rigid slab, same painter order, same warped DOM in the
+ground plane, same corner handles and `⠿` grip — but its ink is a live readout
+instead of editable text, and it is bound to a real agent. `K` drops one; the
+slab shows the tail of that tile's transcript under a **status bar**, so a glance
+across the world shows every harness and what each one is doing.
+
+The bar is derived from omp's own signals, not guessed: `working` while a turn is
+running, `done` for the moment it yields, `waiting for input` once the session
+settles (nothing running, nothing queued — the next move is the user's), `error`
+when a turn or a command failed, `offline` when the process is gone, `idle`
+before the first turn. A dialog omp is blocked on — an approval, a choice, a
+free-text answer — outranks all of it and reads `waiting for input`, with the
+question rendered in the chat window so the harness can be answered instead of
+hanging. The bar carries the tile's own colour and preview size too, so status,
+paper and type are all visible at a glance.
+
+Each tile is one `omp --mode rpc` process, spawned by the dev server and
+addressed by the tile's id (`/api/omp/<id>/…`). The page posts RPC commands
+(`prompt`, `steer`, `abort`, `get_messages`, `get_state`) and follows the
+process's stdout over SSE; `src/omp.js` folds that stream into a small
+transcript, and both views read the same object — the slab draws its last few
+lines, the chat window draws all of it. Under the hood: because a dropped frame
+can be replayed after a reconnect and `message_update` carries the running
+`partial` message, the transcript is rebuilt from whole messages rather than
+patched from deltas, so applying a frame twice changes nothing. Opening a tile
+seeds the transcript with `get_messages`, which is also what restores a resumed
+session after a reload. When the process exits, the tile drops to `offline` and
+the next frame brings up a fresh one on the same session id, so a crash or a
+server restart heals itself; `⟲` restarts it *without* `--continue` to start a
+genuinely fresh conversation.
+
+Because a tile is a tile, everything already true of notes holds: it rests on the
+highest block under it, terrain in front occludes it, its moves and resizes are
+one undo step each, and it is saved and exported as
+`{ id, x, y, w, h, color, fs }` — the conversation is the session's, on disk, not
+the world's. `color` picks one of the dark slabs (the renderer's `CHAT_PAPER`,
+cycled by `●`) and `fs` is the same preview text size a note carries, run through
+the same fit ladder: the tail is typeset at the tile's own size, stepped down a
+couple of notches while that still helps, and clipped at a whole line — the badge
+turns amber with a `…` when there is more than the slab shows. Both are ordinary
+tile patches, so they undo with `Ctrl+Z` and travel in a save.
+
 **Prefab models.** `src/models.js` is a small library of low-poly models (tree,
 pine, bush, house, duck, boat, boulder, cactus, well, campfire, mushroom,
 snowman, ruins). Each is a **polygon mesh** — vertices in block units, faces of
@@ -183,19 +245,22 @@ block the cursor moves into, so holding the button still never stacks a tower.
 ## Files
 
 ```
-index.html      markup: canvas, toolbar, status, editor + help modals
-styles.css      dark UI theme, sticky-note and modal styling
+index.html      markup: canvas, toolbar, status, editor + chat + help modals
+styles.css      dark UI theme, sticky-note, harness-tile and modal styling
+serve.py        dev server: static files, plus the omp RPC bridge over SSE
 src/iso.js      projection, ground-plane raycast, constants
-src/world.js    chunked voxel store, notes, undo/redo, palette, starter island
+src/world.js    chunked voxel store, notes, harness tiles, undo/redo, palette
 src/render.js   canvas renderer: culling, painter sort, flat-shaded model faces,
-                note tiles, hover ghost
+                note and harness tiles, hover ghost
 src/tools.js    what a click does (build/dig/paint footprints per face)
 src/notes.js    note tiles: warped DOM ink, resize handles, proximity hover
+src/harness.js  harness tiles and the chat window: same tile maths, live stream
+src/omp.js      the omp session behind one tile: RPC commands + event transcript
 src/models.js   the low-poly prefab library (polygon meshes + placement helpers)
 src/models.pack.js  models baked from CC0 packs (generated, do not edit)
 src/gallery.js  the model panel: cards, live isometric previews, selection
-src/store.js    localStorage autosave, JSON export/import, v1 migration
-src/main.js     wiring: input, camera, shortcuts, editor modal, status
+src/store.js    localStorage autosave, JSON export/import, migration
+src/main.js     wiring: input, camera, shortcuts, modals, status
 tools/import-pack.mjs  one-off pack converter (run by hand, not at runtime)
 ```
 
@@ -224,6 +289,13 @@ A placed model is `{ id, model, x, y, z }`: a model id from the library plus the
 block column it stands on. Its geometry is regenerated from the library on every
 frame, so a save only stores which model and where.
 
+A harness tile is `{ id, x, y, w, h, color, fs }`: its footprint, a slab colour
+and the preview text size — the same shape a note has, minus the rich text. The
+conversation belongs to the `omp` session keyed by that `id`, kept by the dev
+server under `.island/harness/<id>/`. Reach a tile from the console the same way:
+`island.chatWindow.open(id)` opens its chat, `island.chats` is the tile layer,
+and `island.world.chats` is the list.
+
 ## Limits
 
 * The world is bounded to `z = 0…128`; x and y are unbounded.
@@ -244,3 +316,11 @@ frame, so a save only stores which model and where.
   thousands of blocks will drop frames while panning. Typical islands and note
   canvases are three orders of magnitude below that.
 * Touch pan/pinch is implemented but has only been exercised with a mouse.
+* A harness tile needs `serve.py` *and* `omp` on `PATH`; anything else serves the
+  world normally and shows the tiles as `harness unavailable`. It runs one long-
+  lived `omp` process per tile, rooted in this project, so it can read, run and
+  edit files exactly like the terminal harness — that is the point, and it is why
+  the bridge only listens on loopback.
+* A harness tile shows the *tail* of its conversation (the last few lines that
+  fit); open it for the whole transcript. Its text is drawn plain, so markdown
+  reads as source there rather than typeset.

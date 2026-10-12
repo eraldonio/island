@@ -199,6 +199,177 @@ body {
 .note.fresh { animation: fadein 0.18s ease-out; }
 @keyframes fadein { from { opacity: 0; } }
 
+/* ── harness tiles ───────────────────────────────────────────────────── */
+/* The slab itself is drawn by the renderer; the DOM holds the stream, mapped
+   into the ground plane exactly like a note's ink. */
+.chat {
+  position: absolute; left: 0; top: 0;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+.chat .sheet {
+  position: absolute; left: 0; top: 0;
+  transform-origin: 0 0;
+  pointer-events: auto;
+  cursor: pointer;
+}
+.chat.offline .sheet { opacity: 0.55; }
+.chat .term {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  padding: 5px 6px;
+  overflow: hidden;
+  color: #a9e6c6;
+  font: 8.5px/1.32 ui-monospace, SFMono-Regular, Menlo, monospace;
+  user-select: none;
+}
+/* The header is the tile's status bar: a thin strip across the slab, dot + word. */
+.chat .term-head {
+  display: flex; align-items: center; gap: 3px;
+  flex: 0 0 auto; margin: -5px -6px 2px; padding: 0.5px 5px 1.5px;
+  background: rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  color: #7fb79c; font-size: 6px; line-height: 1.35; letter-spacing: 0.01em;
+  white-space: nowrap; overflow: hidden;
+}
+.chat .term-head .ctitle { font-weight: 700; }
+.chat .term-head .cstate { margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
+.chat .term-head .cdot { width: 4px; height: 4px; border-radius: 50%; background: #4c5f56; flex: 0 0 auto; }
+.chat[data-phase="working"] .term-head { color: #56d9a0; }
+.chat[data-phase="working"] .term-head .cdot { background: #56d9a0; box-shadow: 0 0 4px #56d9a0; }
+.chat[data-phase="done"] .term-head .cdot { background: #56d9a0; }
+.chat[data-phase="waiting"] .term-head { color: #e5b45c; }
+.chat[data-phase="waiting"] .term-head .cdot { background: #e5b45c; }
+.chat[data-phase="input"] .term-head { color: #e5b45c; }
+.chat[data-phase="input"] .term-head .cdot { background: #e5b45c; box-shadow: 0 0 4px #e5b45c; }
+.chat[data-phase="error"] .term-head, .chat[data-phase="offline"] .term-head, .chat[data-phase="nobridge"] .term-head { color: #ff8b84; }
+.chat[data-phase="error"] .term-head .cdot, .chat[data-phase="offline"] .term-head .cdot, .chat[data-phase="nobridge"] .term-head .cdot { background: #ff6b64; }
+.chat[data-phase="connecting"] .term-head { color: #e5b45c; }
+.chat[data-phase="connecting"] .term-head .cdot { background: #e5b45c; }
+.chat .term-body {
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  pointer-events: none;
+}
+.chat .hz {
+  position: absolute; width: 17px; height: 17px; margin: -8.5px 0 0 -8.5px;
+  border-radius: 3px; background: #fff; border: 1.5px solid rgba(0, 0, 0, 0.5);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  opacity: 0; pointer-events: none; cursor: nwse-resize;
+  transition: opacity 0.12s;
+}
+.chat.hot .hz, .chat.resizing .hz { opacity: 0.95; pointer-events: auto; }
+.chat .tools {
+  position: absolute; left: 0; top: 0;
+  transform: translate(-50%, -100%) translateY(-8px);
+  display: flex; align-items: center; gap: 2px;
+  width: max-content;
+  padding: 2px 4px; border-radius: 9px; white-space: nowrap;
+  background: var(--panel); border: 1px solid var(--border);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  opacity: 0; pointer-events: none; transition: opacity 0.12s;
+}
+.chat.hot .tools, .chat.dragging .tools, .chat.resizing .tools { opacity: 1; pointer-events: auto; }
+.chat .tools .size { font: 11px/1 ui-monospace, monospace; color: var(--muted); padding: 0 3px; }
+.chat.tight .tools .size { color: #e5b45c; }
+.chat.tight .tools .size::after { content: " …"; }
+.chat .tools button {
+  width: 21px; height: 19px; display: grid; place-items: center;
+  background: transparent; border: 0; border-radius: 5px;
+  color: var(--fg); opacity: 0.65; cursor: pointer; font: inherit; font-size: 11px; line-height: 1;
+}
+.chat .tools button:hover { opacity: 1; background: var(--hover); }
+.chat .tools button:disabled { opacity: 0.25; cursor: default; }
+.chat .tools .c-fs { font-size: 13px; }
+.chat .tools .c-grip { cursor: grab; font-size: 13px; }
+.chat.dragging .tools .c-grip { cursor: grabbing; }
+.chat.fresh { animation: fadein 0.18s ease-out; }
+
+/* ── the chat window ─────────────────────────────────────────────────── */
+.chatwin {
+  width: min(880px, 95vw); height: min(680px, 90vh);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: #0f141a; color: var(--fg);
+  border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow);
+  font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  user-select: text;
+}
+.crow { display: flex; align-items: center; gap: 6px; padding: 8px 10px; }
+.ctop { border-bottom: 1px solid var(--border); background: rgba(255, 255, 255, 0.03); }
+.cbottom { border-top: 1px solid var(--border); align-items: flex-end; }
+.ctop .cdot { width: 9px; height: 9px; border-radius: 50%; background: #4c5f56; flex: 0 0 auto; }
+.ctop .cdot.working { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 1.1s ease-in-out infinite; }
+.ctop .cdot.done { background: var(--accent); }
+.ctop .cdot.waiting, .ctop .cdot.input, .ctop .cdot.connecting { background: #e5b45c; }
+.ctop .cdot.input { animation: pulse 1.1s ease-in-out infinite; }
+.ctop .cdot.offline, .ctop .cdot.error, .ctop .cdot.nobridge { background: var(--danger); }
+.ctop .ctitle { font-weight: 600; }
+.ctop .cstate { font-size: 11px; }
+.ctop .cmodel { font-size: 11px; opacity: 0.75; }
+
+/* A dialog omp is waiting on: the chat cannot continue without an answer, which
+   is exactly what the tile's "waiting for input" state is reporting. */
+.cdialog {
+  border-top: 1px solid var(--border);
+  background: rgba(229, 180, 92, 0.09);
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+}
+.cdialog[hidden] { display: none; }
+.cdialog .dq { font: inherit; color: #f0d9a8; }
+.cdialog .drow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.cdialog .dopt {
+  font: inherit; padding: 4px 9px; border-radius: 7px; cursor: pointer;
+  background: rgba(255, 255, 255, 0.06); color: var(--fg);
+  border: 1px solid var(--border);
+}
+.cdialog .dopt:hover { background: var(--hover); }
+.cdialog .dopt.on { border-color: var(--accent); color: var(--accent); }
+.cdialog input[type="text"] {
+  flex: 1 1 200px; min-width: 140px; padding: 5px 8px; border-radius: 7px;
+  background: rgba(255, 255, 255, 0.05); color: var(--fg);
+  border: 1px solid var(--border); font: inherit; outline: none;
+}
+.cdialog .dhint { font-size: 11px; color: var(--muted); }
+.clog { flex: 1 1 auto; overflow: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 13px; }
+.clog .ci-role {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted); margin-bottom: 3px;
+}
+.clog .ci-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.clog .ci-user { border-left: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); padding-left: 10px; }
+.clog .ci-user .ci-role { color: var(--accent); }
+.clog .ci-notice .ci-role { color: var(--danger); }
+.clog .ci-empty { color: var(--muted); }
+.clog .ci-tool {
+  margin: 6px 0; padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.035); border: 1px solid var(--border); border-radius: 8px;
+}
+.clog .ci-tool summary { cursor: pointer; display: flex; gap: 8px; align-items: center; }
+.clog .ci-toolname { color: var(--accent); }
+.clog .ci-toolstatus { margin-left: auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+.clog .ci-tool.running .ci-toolstatus { color: #e5b45c; }
+.clog .ci-tool.ok .ci-toolstatus { color: var(--accent); }
+.clog .ci-tool.error .ci-toolstatus { color: var(--danger); }
+.clog .ci-args, .clog .ci-out {
+  margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;
+  max-height: 300px; overflow: auto;
+}
+.clog .ci-args { color: var(--muted); }
+.clog .ci-think summary { cursor: pointer; font-size: 11px; color: var(--muted); }
+.clog .ci-think pre { margin: 6px 0 0; white-space: pre-wrap; color: var(--muted); font: inherit; }
+.clog .ci-caret { display: inline-block; width: 7px; height: 13px; background: var(--accent); animation: blink 1s steps(2) infinite; }
+#chat-input {
+  flex: 1 1 auto; resize: none; min-height: 38px; max-height: 170px;
+  padding: 9px 11px; border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05); color: var(--fg);
+  border: 1px solid var(--border); font: inherit; outline: none;
+}
+#chat-input:focus { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+.cbottom .btn { flex: 0 0 auto; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+@keyframes blink { 50% { opacity: 0; } }
+
 /* ── modals ──────────────────────────────────────────────────────────── */
 .backdrop {
   position: fixed; inset: 0; z-index: 9000;
