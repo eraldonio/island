@@ -135,6 +135,14 @@ dome, tube, log, roof, ring) rather than a hand-written vertex list, which keeps
 the shapes readable and the file short. Sizes are proportional on purpose: the
 duck is about one block, the house about four.
 
+`src/models.pack.js` adds ten more, baked from the CC0 **Kenney Nature Kit** by
+`tools/import-pack.mjs` — a one-off converter (OBJ + MTL in, block-unit triangles
+out) rather than a loader, so the app still ships no dependencies and loads no
+model formats at runtime. A face there is one flat colour taken from its
+material, because the renderer has no textures; imported models keep those
+colours rather than the world's palette, so an imported tree stands out against
+the terrain. See `CREDITS.md` for provenance and licence.
+
 The map grid is used only for *placement*: `modelSize(model, rot)` reports how
 many whole blocks a model claims at that quarter turn (`ceil` of the frame's
 bounding box), the mesh is centred inside that footprint and rests on the clicked
@@ -174,9 +182,11 @@ src/render.js   canvas renderer: culling, painter sort, flat-shaded model faces,
 src/tools.js    what a click does (build/dig/paint footprints per face)
 src/notes.js    note tiles: warped DOM ink, resize handles, proximity hover
 src/models.js   the low-poly prefab library (polygon meshes + placement helpers)
+src/models.pack.js  models baked from CC0 packs (generated, do not edit)
 src/gallery.js  the model panel: cards, live isometric previews, selection
 src/store.js    localStorage autosave, JSON export/import, v1 migration
 src/main.js     wiring: input, camera, shortcuts, editor modal, status
+tools/import-pack.mjs  one-off pack converter (run by hand, not at runtime)
 ```
 
 ## Data, saving, scripting

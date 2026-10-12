@@ -10,14 +10,21 @@
 //
 // Faces are flat-shaded by the renderer from their outward normal (`toneStep` in
 // render.js), so a face is the unit of both shape and colour: the primitives are
-// coarse enough to read as low-poly and round enough to read as cute. Winding is
-// outward — a face whose normal points away from the camera is culled — and
-// every convex primitive orients its own faces away from its own centre, so a
-// primitive's winding cannot be got wrong by hand.
+// coarse enough to read as low-poly and round enough to read as cute. A face
+// carries a colour, not a material id — the authored models use the world's
+// palette (so a stamped tree matches the terrain), while meshes baked in from a
+// pack keep whatever colours they were authored with.
+//
+// Winding is outward — a face whose normal points away from the camera is culled
+// — and every convex primitive orients its own faces away from its own centre, so
+// a primitive's winding cannot be got wrong by hand.
+
+import { PALETTE } from './world.js';
+import { PACK } from './models.pack.js';
 
 export const MODELS = [];
 
-const GRASS = 0, DIRT = 1, STONE = 2, SAND = 3, WOOD = 4, BRICK = 5, SNOW = 6, SLATE = 7, LEAF = 8;
+const [GRASS, DIRT, STONE, SAND, WOOD, BRICK, SNOW, SLATE, LEAF] = PALETTE.map((p) => p.color);
 
 /* ── the mesh ────────────────────────────────────────────────────────── */
 
@@ -62,7 +69,7 @@ class Mesh {
    * the caller authored it inside out. Omit it for faces that carry their own
    * order (the inner side of a shell).
    */
-  face(mat, ids, away) {
+  face(col, ids, away) {
     const n = normalOf(this.verts, ids);
     if (!n) return;
     let c = 0, d = 0, e = 0;
@@ -72,24 +79,24 @@ class Mesh {
       ids.reverse();
       n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2];
     }
-    this.faces.push({ v: ids, mat, n, c: [c, d, e] });
+    this.faces.push({ v: ids, col, n, c: [c, d, e] });
   }
 
-  /** Face from bare positions: `poly(mat, [x,y,z], [x,y,z], [x,y,z], …)`. */
-  poly(mat, ...pts) { this.face(mat, pts.map((p) => this.v(p[0], p[1], p[2])), null); }
+  /** Face from bare positions: `poly(col, [x,y,z], [x,y,z], [x,y,z], …)`. */
+  poly(col, ...pts) { this.face(col, pts.map((p) => this.v(p[0], p[1], p[2])), null); }
 
-  quad(mat, a, b, c, d, away) { this.face(mat, [this.v(...a), this.v(...b), this.v(...c), this.v(...d)], away); }
+  quad(col, a, b, c, d, away) { this.face(col, [this.v(...a), this.v(...b), this.v(...c), this.v(...d)], away); }
 
-  tri(mat, a, b, c, away) { this.face(mat, [this.v(...a), this.v(...b), this.v(...c)], away); }
+  tri(col, a, b, c, away) { this.face(col, [this.v(...a), this.v(...b), this.v(...c)], away); }
 
   /** Mark to hand to `paint`, so a pass touches only the faces added after it. */
   mark() { return this.faces.length; }
 
-  /** Recolour faces from `from` on, wherever `pick` returns a material id. */
+  /** Recolour faces from `from` on, wherever `pick` returns a colour. */
   paint(from, pick) {
     for (let i = from; i < this.faces.length; i++) {
-      const mat = pick(this.faces[i], i);
-      if (mat != null) this.faces[i].mat = mat;
+      const col = pick(this.faces[i], i);
+      if (col != null) this.faces[i].col = col;
     }
   }
 }
@@ -97,7 +104,7 @@ class Mesh {
 /* ── primitives ──────────────────────────────────────────────────────── */
 
 /** Box, centred, with full extents `sx sy sz` and a yaw about z. */
-function box(m, mat, cx, cy, cz, sx, sy, sz, yaw = 0) {
+function box(m, col, cx, cy, cz, sx, sy, sz, yaw = 0) {
   const ca = Math.cos(yaw), sa = Math.sin(yaw);
   const at = [];
   for (const i of [0, 1]) {
@@ -110,12 +117,12 @@ function box(m, mat, cx, cy, cz, sx, sy, sz, yaw = 0) {
   }
   const p = (i, j, k) => at[i * 4 + j * 2 + k];
   const c = [cx, cy, cz];
-  m.quad(mat, p(0, 0, 0), p(0, 1, 0), p(1, 1, 0), p(1, 0, 0), c);   // bottom
-  m.quad(mat, p(0, 0, 1), p(1, 0, 1), p(1, 1, 1), p(0, 1, 1), c);   // top
-  m.quad(mat, p(0, 0, 0), p(1, 0, 0), p(1, 0, 1), p(0, 0, 1), c);   // -y
-  m.quad(mat, p(1, 1, 0), p(0, 1, 0), p(0, 1, 1), p(1, 1, 1), c);   // +y
-  m.quad(mat, p(0, 1, 0), p(0, 0, 0), p(0, 0, 1), p(0, 1, 1), c);   // -x
-  m.quad(mat, p(1, 0, 0), p(1, 1, 0), p(1, 1, 1), p(1, 0, 1), c);   // +x
+  m.quad(col, p(0, 0, 0), p(0, 1, 0), p(1, 1, 0), p(1, 0, 0), c);   // bottom
+  m.quad(col, p(0, 0, 1), p(1, 0, 1), p(1, 1, 1), p(0, 1, 1), c);   // top
+  m.quad(col, p(0, 0, 0), p(1, 0, 0), p(1, 0, 1), p(0, 0, 1), c);   // -y
+  m.quad(col, p(1, 1, 0), p(0, 1, 0), p(0, 1, 1), p(1, 1, 1), c);   // +y
+  m.quad(col, p(0, 1, 0), p(0, 0, 0), p(0, 0, 1), p(0, 1, 1), c);   // -x
+  m.quad(col, p(1, 0, 0), p(1, 1, 0), p(1, 1, 1), p(1, 0, 1), c);   // +x
 }
 
 /** Vertices of an elliptical ring in the xy-plane, one per segment. */
@@ -137,7 +144,7 @@ function circle(m, cx, cy, z, r, seg) {
  * Faceted ellipsoid: `seg` facets around z, `rings` bands pole to pole. This is
  * the workhorse for anything round — bodies, heads, clumps, boulders, fruit.
  */
-function ball(m, mat, cx, cy, cz, rx, ry, rz, seg = 9, rings = 4) {
+function ball(m, col, cx, cy, cz, rx, ry, rz, seg = 9, rings = 4) {
   const rows = [];
   for (let r = 0; r <= rings; r++) {
     const t = r / rings;
@@ -150,15 +157,15 @@ function ball(m, mat, cx, cy, cz, rx, ry, rz, seg = 9, rings = 4) {
     const lo = rows[r], hi = rows[r + 1];
     for (let s = 0; s < seg; s++) {
       const t = (s + 1) % seg;
-      if (r === 0) m.face(mat, [lo[0], hi[t], hi[s]], c);
-      else if (r === rings - 1) m.face(mat, [hi[0], lo[s], lo[t]], c);
-      else m.face(mat, [lo[s], lo[t], hi[t], hi[s]], c);
+      if (r === 0) m.face(col, [lo[0], hi[t], hi[s]], c);
+      else if (r === rings - 1) m.face(col, [hi[0], lo[s], lo[t]], c);
+      else m.face(col, [lo[s], lo[t], hi[t], hi[s]], c);
     }
   }
 }
 
 /** Upper half of an ellipsoid, closed underneath: a mushroom cap, a lid. */
-function dome(m, mat, cx, cy, cz, rx, ry, rz, seg = 10, rings = 3) {
+function dome(m, col, cx, cy, cz, rx, ry, rz, seg = 10, rings = 3) {
   const rows = [];
   for (let r = 0; r <= rings; r++) {
     const t = (r / rings) * (Math.PI / 2);
@@ -171,40 +178,40 @@ function dome(m, mat, cx, cy, cz, rx, ry, rz, seg = 10, rings = 3) {
     const lo = rows[r], hi = rows[r + 1];
     for (let s = 0; s < seg; s++) {
       const t = (s + 1) % seg;
-      if (r === rings - 1) m.face(mat, [hi[0], lo[s], lo[t]], c);
-      else m.face(mat, [lo[s], lo[t], hi[t], hi[s]], c);
+      if (r === rings - 1) m.face(col, [hi[0], lo[s], lo[t]], c);
+      else m.face(col, [lo[s], lo[t], hi[t], hi[s]], c);
     }
   }
-  m.face(mat, ringAt(m, cx, cy, cz, rx, ry, seg), [cx, cy, cz + 1]);
+  m.face(col, ringAt(m, cx, cy, cz, rx, ry, seg), [cx, cy, cz + 1]);
 }
 
 /** Flat elliptical disc; `up` faces +z, otherwise -z (water, hatch, lids). */
-function disc(m, mat, cx, cy, z, rx, ry, seg = 10, up = true) {
+function disc(m, col, cx, cy, z, rx, ry, seg = 10, up = true) {
   const ids = [];
   for (let s = 0; s < seg; s++) {
     const a = (2 * Math.PI * s) / seg;
     ids.push(m.v(cx + rx * Math.cos(a), cy + ry * Math.sin(a), z));
   }
-  m.face(mat, ids, [cx, cy, up ? z - 1 : z + 1]);
+  m.face(col, ids, [cx, cy, up ? z - 1 : z + 1]);
 }
 
 /** Vertical tube: cylinder, frustum, or a cone when `r1` is 0. */
-function tube(m, mat, cx, cy, z0, z1, r0, r1 = r0, seg = 8, capBot = false, capTop = true) {
+function tube(m, col, cx, cy, z0, z1, r0, r1 = r0, seg = 8, capBot = false, capTop = true) {
   const bot = circle(m, cx, cy, z0, r0, seg);
   const top = circle(m, cx, cy, z1, r1, seg);
   const c = [cx, cy, (z0 + z1) / 2];
   for (let s = 0; s < seg; s++) {
     const t = (s + 1) % seg;
-    if (top.length === 1) m.face(mat, [bot[s], bot[t], top[0]], c);
-    else if (bot.length === 1) m.face(mat, [bot[0], top[s], top[t]], c);
-    else m.face(mat, [bot[s], bot[t], top[t], top[s]], c);
+    if (top.length === 1) m.face(col, [bot[s], bot[t], top[0]], c);
+    else if (bot.length === 1) m.face(col, [bot[0], top[s], top[t]], c);
+    else m.face(col, [bot[s], bot[t], top[t], top[s]], c);
   }
-  if (capTop && top.length > 1) m.face(mat, top.slice(), [cx, cy, z1 - 1]);
-  if (capBot && bot.length > 1) m.face(mat, bot.slice(), [cx, cy, z0 + 1]);
+  if (capTop && top.length > 1) m.face(col, top.slice(), [cx, cy, z1 - 1]);
+  if (capBot && bot.length > 1) m.face(col, bot.slice(), [cx, cy, z0 + 1]);
 }
 
 /** Horizontal tube between two ground points: a log, or a spike when `r1` is 0. */
-function log(m, mat, x0, y0, x1, y1, z, r0, r1 = r0, seg = 6, capStart = true, capEnd = true) {
+function log(m, col, x0, y0, x1, y1, z, r0, r1 = r0, seg = 6, capStart = true, capEnd = true) {
   const dx = x1 - x0, dy = y1 - y0;
   const len = Math.hypot(dx, dy) || 1;
   const ux = -dy / len, uy = dx / len;          // the ring's radial basis
@@ -221,40 +228,40 @@ function log(m, mat, x0, y0, x1, y1, z, r0, r1 = r0, seg = 6, capStart = true, c
   const c = [(x0 + x1) / 2, (y0 + y1) / 2, z];
   for (let s = 0; s < seg; s++) {
     const t = (s + 1) % seg;
-    if (a1.length === 1) m.face(mat, [a0[s], a0[t], a1[0]], c);
-    else if (a0.length === 1) m.face(mat, [a0[0], a1[s], a1[t]], c);
-    else m.face(mat, [a0[s], a0[t], a1[t], a1[s]], c);
+    if (a1.length === 1) m.face(col, [a0[s], a0[t], a1[0]], c);
+    else if (a0.length === 1) m.face(col, [a0[0], a1[s], a1[t]], c);
+    else m.face(col, [a0[s], a0[t], a1[t], a1[s]], c);
   }
-  if (capStart && a0.length > 1) m.face(mat, a0.slice(), c);
-  if (capEnd && a1.length > 1) m.face(mat, a1.slice(), c);
+  if (capStart && a0.length > 1) m.face(col, a0.slice(), c);
+  if (capEnd && a1.length > 1) m.face(col, a1.slice(), c);
 }
 
 /** Gable roof: two slopes and two gable ends, the ridge along x at `cy`. */
-function roof(m, mat, cx, cy, zEave, zRidge, sx, sy) {
+function roof(m, col, cx, cy, zEave, zRidge, sx, sy) {
   const x0 = cx - sx / 2, x1 = cx + sx / 2, y0 = cy - sy / 2, y1 = cy + sy / 2;
   const c = [cx, cy, (zEave + zRidge) / 2];
-  m.quad(mat, [x0, y0, zEave], [x1, y0, zEave], [x1, cy, zRidge], [x0, cy, zRidge], c);
-  m.quad(mat, [x1, y1, zEave], [x0, y1, zEave], [x0, cy, zRidge], [x1, cy, zRidge], c);
-  m.tri(mat, [x0, y0, zEave], [x0, cy, zRidge], [x0, y1, zEave], c);
-  m.tri(mat, [x1, y0, zEave], [x1, y1, zEave], [x1, cy, zRidge], c);
+  m.quad(col, [x0, y0, zEave], [x1, y0, zEave], [x1, cy, zRidge], [x0, cy, zRidge], c);
+  m.quad(col, [x1, y1, zEave], [x0, y1, zEave], [x0, cy, zRidge], [x1, cy, zRidge], c);
+  m.tri(col, [x0, y0, zEave], [x0, cy, zRidge], [x0, y1, zEave], c);
+  m.tri(col, [x1, y0, zEave], [x1, y1, zEave], [x1, cy, zRidge], c);
 }
 
 /** Annulus wall with both rims: a well's kerb, a rim of a tub. */
-function ring(m, mat, cx, cy, z0, z1, rOut, rIn, seg = 9) {
+function ring(m, col, cx, cy, z0, z1, rOut, rIn, seg = 9) {
   const o0 = circle(m, cx, cy, z0, rOut, seg), o1 = circle(m, cx, cy, z1, rOut, seg);
   const i0 = circle(m, cx, cy, z0, rIn, seg), i1 = circle(m, cx, cy, z1, rIn, seg);
   const c = [cx, cy, (z0 + z1) / 2];
   for (let s = 0; s < seg; s++) {
     const t = (s + 1) % seg;
-    m.face(mat, [o0[s], o0[t], o1[t], o1[s]], c);                        // outer, faces out
-    m.face(mat, [i1[s], i1[t], i0[t], i0[s]]);                           // inner, faces the axis
-    m.face(mat, [o1[s], o1[t], i1[t], i1[s]], [cx, cy, z1 - 1]);         // rim up
-    m.face(mat, [i0[s], i0[t], o0[t], o0[s]], [cx, cy, z0 + 1]);         // rim down
+    m.face(col, [o0[s], o0[t], o1[t], o1[s]], c);                        // outer, faces out
+    m.face(col, [i1[s], i1[t], i0[t], i0[s]]);                           // inner, faces the axis
+    m.face(col, [o1[s], o1[t], i1[t], i1[s]], [cx, cy, z1 - 1]);         // rim up
+    m.face(col, [i0[s], i0[t], o0[t], o0[s]], [cx, cy, z0 + 1]);         // rim down
   }
 }
 
 /**
- * One flat face as a `cols` x `rows` grid, `cell(col, row)` picking a material
+ * One flat face as a `cols` x `rows` grid, `cell(col, row)` picking a colour
  * per cell. A door or a window has to be real geometry rather than a patch laid
  * on the wall: a coplanar patch of another colour sorts behind the wall it sits
  * on (the wall's centroid is nearer the camera than the patch's) and is never
@@ -262,7 +269,7 @@ function ring(m, mat, cx, cy, z0, z1, rOut, rIn, seg = 9) {
  * point the wall must look away from — inside the building — so the four walls
  * of a box cannot be wound inside out by hand.
  */
-function grid(m, mat, a, b, c, d, cols, rows, cell, away) {
+function grid(m, base, a, b, c, d, cols, rows, cell, away) {
   const at = (u, v) => [
     a[0] * (1 - u) * (1 - v) + b[0] * u * (1 - v) + c[0] * u * v + d[0] * (1 - u) * v,
     a[1] * (1 - u) * (1 - v) + b[1] * u * (1 - v) + c[1] * u * v + d[1] * (1 - u) * v,
@@ -270,7 +277,7 @@ function grid(m, mat, a, b, c, d, cols, rows, cell, away) {
   ];
   for (let col = 0; col < cols; col++) {
     for (let row = 0; row < rows; row++) {
-      m.quad(cell(col, row) ?? mat, at(col / cols, row / rows), at((col + 1) / cols, row / rows),
+      m.quad(cell(col, row) ?? base, at(col / cols, row / rows), at((col + 1) / cols, row / rows),
         at((col + 1) / cols, (row + 1) / rows), at(col / cols, (row + 1) / rows), away);
     }
   }
@@ -459,32 +466,54 @@ function frame(verts, faces) {
   const w = Math.ceil(span[0] - 1e-6), h = Math.ceil(span[1] - 1e-6), hz = Math.ceil(span[2] - 1e-6);
   return {
     verts: verts.map((v) => [v[0] - lo[0], v[1] - lo[1], v[2] - lo[2]]),
-    faces: faces.map((f) => ({ v: f.v, mat: f.mat, n: f.n, c: [f.c[0] - lo[0], f.c[1] - lo[1], f.c[2] - lo[2]] })),
+    faces: faces.map((f) => ({ v: f.v, col: f.col, n: f.n, c: [f.c[0] - lo[0], f.c[1] - lo[1], f.c[2] - lo[2]] })),
     size: { w, h, hz },
     offset: { x: (w - span[0]) / 2, y: (h - span[1]) / 2 },
   };
 }
 
 /**
- * Register a model: build its mesh, bake its four quarter turns, and work out
- * how many whole blocks each one claims. The mesh is centred in that footprint —
- * the grid is the placement's business, not the model's — and models keep their
- * proportions, so the duck stands about a block tall and the house is about four
- * across. A rotation about z only swaps and negates coordinates, so the frames
- * are exact and a placed model can be turned without re-deriving anything.
+ * Bake a built mesh's four quarter turns and publish it. A rotation about z only
+ * swaps and negates coordinates, so the frames are exact and a placed model can
+ * be turned without re-deriving anything. The mesh is centred in the whole blocks
+ * it claims — the grid is the placement's business, not the model's — and models
+ * keep their proportions, so the duck stands about a block tall and the house is
+ * about four across.
  */
-function define(id, name, build) {
-  const m = new Mesh();
-  build(m);
-
+function bake(id, name, m, source) {
   const frames = [];
   let verts = m.verts, faces = m.faces;
   for (let k = 0; k < 4; k++) {
     frames.push(frame(verts, faces));
     verts = verts.map(turnZ);
-    faces = faces.map((f) => ({ v: f.v, mat: f.mat, n: turnZ(f.n), c: turnZ(f.c) }));
+    faces = faces.map((f) => ({ v: f.v, col: f.col, n: turnZ(f.n), c: turnZ(f.c) }));
   }
-  MODELS.push({ id, name, frames });
+  MODELS.push(source ? { id, name, frames, source } : { id, name, frames });
+}
+
+/** Register a model built from the primitives above. */
+function define(id, name, build) {
+  const m = new Mesh();
+  build(m);
+  bake(id, name, m);
+}
+
+/**
+ * Register a mesh baked in from a pack by tools/import-pack.mjs. Pack geometry
+ * arrives as block-unit triangles with a colour each — the same thing the
+ * primitives above produce (and they are welded again here) — so a pack model
+ * gets quarter turns, a footprint, a ghost and a gallery card on the same terms
+ * as an authored one. It keeps the pack's own colours rather than the world's
+ * palette: an imported tree is greener than the terrain it stands on, which is
+ * the point of importing it.
+ */
+function definePack(entry) {
+  const m = new Mesh();
+  const at = (i) => [entry.verts[i * 3], entry.verts[i * 3 + 1], entry.verts[i * 3 + 2]];
+  for (let t = 0; t < entry.tris.length; t += 4) {
+    m.tri(entry.cols[entry.tris[t + 3]], at(entry.tris[t]), at(entry.tris[t + 1]), at(entry.tris[t + 2]));
+  }
+  bake(entry.id, entry.name, m, entry.source);
 }
 
 define('duck', 'Duck', duck);
@@ -501,6 +530,10 @@ define('ruins', 'Ruins', ruins);
 define('tree', 'Tree', tree);
 define('pine', 'Pine', pine);
 define('house', 'House', house);
+
+// Meshes baked from CC0 packs (see CREDITS.md and tools/import-pack.mjs). They
+// come after the authored models so the gallery reads hand-made first.
+for (const entry of PACK) definePack(entry);
 
 /** A model's four quarter turns, in order: index straight in by a prop's `rot`. */
 export function modelFrames(model) {

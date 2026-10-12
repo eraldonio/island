@@ -136,7 +136,7 @@ export function paintModel(ctx, frame, { x = 0, y = 0, z = 0, view = ISO, scale 
   ctx.lineJoin = 'round';
   let style = '';
   for (const { f } of order) {
-    const c = toneColor(PALETTE[f.mat].color, toneStep(f.n));
+    const c = toneColor(f.col, toneStep(f.n));
     if (c !== style) { ctx.fillStyle = style = c; ctx.strokeStyle = style; }
     const vs = f.v;
     ctx.beginPath();
@@ -169,9 +169,9 @@ export class Renderer {
     this.buf = {
       keys: [], kinds: [], notes: [], xs: [], ys: [], zs: [], mats: [], masks: [], ax: [], ay: [],
       // Model faces: one run of screen coords per entry, referenced by fstart/fcount.
-      fx: [], fy: [], fstart: [], fcount: [], fmat: [], fstep: [],
+      fx: [], fy: [], fstart: [], fcount: [], fcol: [], fstep: [],
     };
-    this.tone = PALETTE.map(() => []);   // [mat][step] -> colour string, built lazily
+    this.tone = new Map();   // face colour -> [step] -> css colour, built lazily
     this.resize();
   }
 
@@ -194,11 +194,12 @@ export class Renderer {
   /** Screen-space images of the world x, y and z axes at the current zoom. */
   basis() { return basisOf(this.v, this.cam.scale); }
 
-  /** Cached flat tone for a (palette index, tone step) pair. */
-  toneFor(mat, step) {
-    const row = this.tone[mat];
+  /** Cached flat tone for a (face colour, tone step) pair. */
+  toneFor(col, step) {
+    let row = this.tone.get(col);
+    if (!row) this.tone.set(col, row = []);
     let c = row[step];
-    if (c === undefined) c = row[step] = toneColor(PALETTE[mat].color, step);
+    if (c === undefined) c = row[step] = toneColor(col, step);
     return c;
   }
 
@@ -295,7 +296,7 @@ export class Renderer {
     g.xs.length = 0; g.ys.length = 0; g.zs.length = 0;
     g.mats.length = 0; g.masks.length = 0; g.ax.length = 0; g.ay.length = 0;
     g.fx.length = 0; g.fy.length = 0; g.fstart.length = 0; g.fcount.length = 0;
-    g.fmat.length = 0; g.fstep.length = 0;
+    g.fcol.length = 0; g.fstep.length = 0;
 
     const world = this.world;
     const v = this.v;
@@ -343,7 +344,7 @@ export class Renderer {
         g.masks.push((up ? 1 : 0) | (rt ? 2 : 0) | (lf ? 4 : 0));
         g.ax.push(ax); g.ay.push(ay);
         g.kinds.push(0); g.notes.push(0);
-        g.fstart.push(0); g.fcount.push(0); g.fmat.push(0); g.fstep.push(0);
+        g.fstart.push(0); g.fcount.push(0); g.fcol.push(0); g.fstep.push(0);
         g.keys.push(depthKey(x, y, z, v, n));
         if (++n >= KEY_MASK) break outer;
       }
@@ -369,7 +370,7 @@ export class Renderer {
       g.mats.push(0); g.masks.push(0);
       g.kinds.push(1); g.notes.push(ni);
       g.ax.push(a.x); g.ay.push(a.y);
-      g.fstart.push(0); g.fcount.push(0); g.fmat.push(0); g.fstep.push(0);
+      g.fstart.push(0); g.fcount.push(0); g.fcol.push(0); g.fstep.push(0);
       g.keys.push(depthKey(note.x + note.w, note.y + note.h, L, v, n));
       if (++n >= KEY_MASK) break;
     }
@@ -429,13 +430,12 @@ export class Renderer {
           g.fx.length = start; g.fy.length = start;   // off-screen: drop the run
           continue;
         }
-        const mat = f.mat;
         g.xs.push(0); g.ys.push(0); g.zs.push(0);
-        g.mats.push(mat); g.masks.push(0);
+        g.mats.push(0); g.masks.push(0);
         g.kinds.push(3); g.notes.push(0);
         g.ax.push(0); g.ay.push(0);
         g.fstart.push(start); g.fcount.push(cnt);
-        g.fmat.push(mat); g.fstep.push(toneStep(fn));
+        g.fcol.push(f.col); g.fstep.push(toneStep(fn));
         g.keys.push(depthKey(o.x + f.c[0], o.y + f.c[1], o.z + f.c[2], v, n));
         if (++n >= KEY_MASK) break prop;
       }
@@ -459,7 +459,7 @@ export class Renderer {
       if (kind === 1) { this.drawNoteTile(ctx, this.world.notes[g.notes[k]], g.zs[k], U, V); continue; }
 
       if (kind === 3) {                           // a placed model's face
-        const c = this.toneFor(g.fmat[k], g.fstep[k]);
+        const c = this.toneFor(g.fcol[k], g.fstep[k]);
         if (c !== style) { ctx.fillStyle = style = c; ctx.strokeStyle = style; }
         const s = g.fstart[k];
         const e = s + g.fcount[k];

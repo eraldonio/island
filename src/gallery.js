@@ -25,7 +25,7 @@ export class Gallery {
       card.type = 'button';
       card.className = 'mcard';
       card.dataset.id = model.id;
-      card.title = model.name;
+      card.title = model.source ? `${model.name} — ${model.source}` : model.name;
       const canvas = document.createElement('canvas');
       const name = document.createElement('span');
       name.className = 'mname';
