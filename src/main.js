@@ -233,8 +233,12 @@ function exec(cmd, val) {
 
 /* ── sculpting ───────────────────────────────────────────────────────── */
 
-let mode = null;          // null | 'pan' | 'sculpt'
+let mode = null;          // null | 'pan' | 'orbit' | 'sculpt'
 let pan = null;
+let orbit = null;         // { x, y, spin, tilt } while a middle-drag orbits
+
+// Degrees of spin/tilt per pixel dragged with the middle button.
+const ORBIT_SPEED = 0.4;
 let strokeKeys = null;    // voxel cells this stroke has already touched
 let strokeColumns = null; // "x,y" columns this stroke has already acted on
 let strokeUndo = null;    // "x,y,z" -> what was there before this stroke touched it
@@ -410,7 +414,20 @@ canvas.addEventListener('pointerdown', (e) => {
     }
   }
 
-  const wantsPan = e.button === 1 || e.button === 2 || state.space || state.tool === 'pan';
+  // The middle button orbits: horizontal drags take the world to any azimuth,
+  // vertical drags raise or lower the camera, exactly like the spin/tilt
+  // sliders (down pulls the view toward straight down). Panning keeps
+  // Space+drag, right-drag, the pan tool and Shift+wheel.
+  if (e.button === 1) {
+    e.preventDefault();          // no middle-click autoscroll
+    canvas.setPointerCapture(e.pointerId);
+    mode = 'orbit';
+    orbit = { x: e.clientX, y: e.clientY, spin: cam.spin, tilt: cam.tilt };
+    canvas.classList.add('orbiting');
+    return;
+  }
+
+  const wantsPan = e.button === 2 || state.space || state.tool === 'pan';
   if (wantsPan) {
     canvas.setPointerCapture(e.pointerId);
     mode = 'pan';
@@ -456,6 +473,15 @@ canvas.addEventListener('pointermove', (e) => {
     return;
   }
 
+  if (mode === 'orbit' && orbit) {
+    setView(
+      orbit.spin - (e.clientX - orbit.x) * ORBIT_SPEED,
+      orbit.tilt + (e.clientY - orbit.y) * ORBIT_SPEED,
+    );
+    notes.rehover();
+    return;
+  }
+
   if (mode === 'pan' && pan) {
     cam.ox += e.clientX - pan.x;
     cam.oy += e.clientY - pan.y;
@@ -478,6 +504,13 @@ function onUp(e) {
   if (pointers.has(e.pointerId)) {
     pointers.delete(e.pointerId);
     if (pointers.size < 2) pinch = null;
+  }
+  if (mode === 'orbit') {
+    mode = null;
+    orbit = null;
+    canvas.classList.remove('orbiting');
+    requestSave();
+    return;
   }
   if (mode === 'pan') {
     canvas.classList.remove('panning');

@@ -35,16 +35,16 @@ which browsers refuse to load from the filesystem.
 | Resize a note | drag a white corner handle — it snaps to whole blocks |
 | Move a note | drag its `⠿` grip onto another block |
 | Cycle paper colour / delete | `●` / `×` on the note |
-| Pan | `Space`+drag, middle-drag, right-drag, `Shift`+wheel, or the pan tool |
+| Pan | `Space`+drag, right-drag, `Shift`+wheel, or the pan tool |
 | Zoom | wheel (at the cursor), `Ctrl`+wheel, `+` / `−`, or pinch on touch |
-| Orbit the camera | the `spin` and `tilt` sliders: spin turns the world to any azimuth, tilt raises the camera from nearly edge-on to straight down. Straight down with spin 0 makes note writing read head-on |
+| Orbit the camera | middle-drag, or the `spin` and `tilt` sliders: spin turns the world to any azimuth, tilt raises the camera from nearly edge-on to straight down. Straight down with spin 0 makes note writing read head-on |
 | Face the notes | `V` jumps between the isometric default and that straight-down pose |
 | Centre the view | `0` |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Shift+Z` |
 | Help | `?` |
 
-The camera angle is fixed by design: the world only pans and zooms, which is
-what makes the whole renderer cheap.
+Pans and zooms never change the angle, and a middle-drag orbits it: the whole
+renderer stays cheap because the angle only has to be re-derived, never traced.
 
 ## How it works
 
