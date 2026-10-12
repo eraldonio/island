@@ -230,6 +230,15 @@ const parseJSON = (content, what) => {
   return data;
 };
 
+/**
+ * The names an expression is written against. A check has to run the
+ * expression to catch a syntax or arity error, and the evaluator refuses any
+ * name the scope does not carry — so it is handed the same names `viewOf`
+ * gives a card at paint time. Without this every honest `value: "v"` came back
+ * as `unknown name 'v'`, which refused the catalog's own template.
+ */
+const CHECK_SCOPE = { v: 0, raw: 0, sub: '', status: 'ok', at: 0, age: 0, state: {}, now: 0, error: null };
+
 /** Everything wrong with a definition, so one write reports all of it at once. */
 function definitionProblems(def) {
   const bad = [];
@@ -253,9 +262,14 @@ function definitionProblems(def) {
       for (const [k, v] of Object.entries(b.set || {})) exprs.push([`buttons[${i}].set.${k}`, v]);
     }
   } else if (def.buttons !== undefined) bad.push('buttons must be an array');
+  // The definition's own declared state goes into the check scope too, so a
+  // state key written bare gets the evaluator's "did you mean state.x?" hint.
+  const checkScope = def.state && typeof def.state === 'object' && !Array.isArray(def.state)
+    ? Object.assign({}, CHECK_SCOPE, { state: def.state })
+    : CHECK_SCOPE;
   for (const [where, src] of exprs) {
     try {
-      evaluate(String(src), {});
+      evaluate(String(src), checkScope);
     } catch (err) {
       bad.push(`${where}: ${String((err && err.message) || err)}`);
     }
