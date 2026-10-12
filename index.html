@@ -36,6 +36,9 @@
     <button class="tbtn" data-tool="stamp" title="Place a model from the gallery (M)">
       <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.2 15.4 6v6.4L10 15.2 4.6 12.4V6z"/><path d="M4.6 6 10 8.8l5.4-2.8M10 8.8v6.4"/><path d="M6 16.6h8"/></svg>
     </button>
+    <button class="tbtn" data-tool="island" title="Island — stamp a preconfigured island: relief, elements and notes (I)">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.4 13.9c2-2 4.4-3 7.6-3s5.6 1 7.6 3"/><path d="M3 16.6h14"/><path d="M10 10.9V3.6M8.6 3.6h2.8M9.1 6.1h1.8"/></svg>
+    </button>
     <button class="tbtn" data-tool="grab" title="Move a placed model — drag it to another block, R turns it a quarter (G)">
       <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.6v14.8M2.6 10h14.8"/><path d="M10 2.6 7.7 5.2M10 2.6l2.3 2.6M10 17.4l-2.3-2.6M10 17.4l2.3-2.6M2.6 10l2.6-2.3M2.6 10l2.6 2.3M17.4 10l-2.6-2.3M17.4 10l-2.6 2.3"/></svg>
     </button>
@@ -48,6 +51,9 @@
 
 <!-- ── model gallery ───────────────────────────────────────────────────── -->
 <div id="gallery" class="panel gallery" hidden aria-label="Models"></div>
+
+<!-- ── island gallery ──────────────────────────────────────────────────── -->
+<div id="islands" class="panel gallery islands" hidden aria-label="Islands"></div>
 
 <!-- ── status ──────────────────────────────────────────────────────────── -->
 <div id="status" class="panel status" aria-live="polite">
@@ -152,11 +158,17 @@
         <ul>
           <li><b>Click / drag</b> — apply the current tool; a drag acts once per block
               the cursor moves into, so holding still adds nothing more</li>
-          <li><b>B</b> build · <b>D</b> dig · <b>P</b> paint · <b>N</b> note · <b>K</b> harness · <b>M</b> place a model · <b>G</b> move · <b>H</b> pan</li>
+          <li><b>B</b> build · <b>D</b> dig · <b>P</b> paint · <b>N</b> note · <b>K</b> harness · <b>M</b> place a model · <b>I</b> place an island · <b>G</b> move · <b>H</b> pan</li>
           <li><b>M</b> opens the model gallery: pick a low-poly prefab (tree, house,
-              duck…), then click the world — it claims its own blocks, resting on the
-              surface. Models keep their proportions, so the duck really is smaller
-              than the house. <b>Dig</b> a model to take it away</li>
+              duck, lighthouse, windmill, tent, pier, watchtower, statue, crate, barrel,
+              signpost, lamp, palm, haystack…), then click the world — it claims its own
+              blocks, resting on the surface. Models keep their proportions, so the duck
+              really is smaller than the house. <b>Dig</b> a model to take it away</li>
+          <li><b>I</b> opens the island gallery: pick a whole preconfigured place — its own
+              relief, the models standing on it and its notes — then click the world and
+              the island lands there, centred on the column you clicked and resting on it.
+              Relief, elements and notes are one undo step, and once placed they are
+              ordinary blocks, models and notes you can edit, dig or move</li>
           <li><b>G</b> moves a model you have placed: drag it and it snaps to whole
               blocks, riding the surface it lands on (one undo step per drag).
               <b>R</b> / <b>Shift+R</b> turns the model under the cursor a quarter turn

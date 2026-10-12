@@ -444,6 +444,138 @@ function house(m) {
   box(m, BRICK, 0.75, 0.75, 1.62, 0.34, 0.34, 0.72);                    // chimney
 }
 
+function lighthouse(m) {
+  const waist = 4.30, deck = 5.90;
+  tube(m, STONE, 0.50, 0.50, 0.0, 0.30, 1.02, 0.98, 10, true, false);   // plinth
+  // The shaft is stacked rather than one taper, because a face carries one
+  // colour: only a band that *is* geometry can be painted red.
+  let z = 0.30, r = 0.92;
+  for (let i = 0; i < 5; i++) {
+    const z1 = 0.30 + (waist - 0.30) * ((i + 1) / 5);
+    const r1 = 0.92 + (0.40 - 0.92) * ((i + 1) / 5);
+    tube(m, i % 2 ? BRICK : SNOW, 0.50, 0.50, z, z1, r, r1, 10, false, false);
+    z = z1; r = r1;
+  }
+  ring(m, SLATE, 0.50, 0.50, waist, waist + 0.18, 1.06, 0.40, 10);      // gallery deck
+  ring(m, SNOW, 0.50, 0.50, waist + 0.18, waist + 0.40, 1.02, 0.86, 10); // railing
+  tube(m, SAND, 0.50, 0.50, waist + 0.18, deck, 0.36, 0.32, 8, false, false);  // lantern room
+  dome(m, BRICK, 0.50, 0.50, deck, 0.44, 0.44, 0.34, 8, 3);             // roof
+  ball(m, SAND, 0.50, 0.50, deck + 0.34, 0.09, 0.09, 0.11, 5, 2);       // finial
+  box(m, WOOD, 0.50, -0.36, 0.55, 0.34, 0.24, 0.72);                    // door, proud of the wall
+}
+
+function windmill(m) {
+  const hub = [0.50, -0.30, 3.42];
+  tube(m, STONE, 0.50, 0.50, 0.0, 0.32, 1.30, 1.22, 10, true, false);   // stone footing
+  tube(m, SNOW, 0.50, 0.50, 0.32, 3.20, 1.14, 0.60, 10, false, false);  // tapering body
+  dome(m, BRICK, 0.50, 0.50, 3.20, 0.78, 0.78, 0.60, 10, 3);            // cap
+  ball(m, WOOD, hub[0], hub[1], hub[2], 0.17, 0.17, 0.17, 6, 3);        // axle
+  box(m, WOOD, hub[0], hub[1], hub[2], 0.11, 0.11, 2.60);               // upright sail beam
+  box(m, WOOD, hub[0], hub[1], hub[2], 2.60, 0.11, 0.11);               // and the crossing one
+  for (const [dx, dz] of [[0.95, 0], [-0.95, 0], [0, 0.95], [0, -0.95]]) {
+    box(m, SAND, hub[0] + dx, hub[1], hub[2] + dz, dx ? 0.82 : 0.62, 0.07, dz ? 0.82 : 0.62);
+  }
+  box(m, WOOD, 0.50, -0.72, 0.52, 0.46, 0.20, 0.76);                    // door at the foot
+}
+
+function tent(m) {
+  // The pitch is deliberately shallow: at the default camera elevation a steep
+  // ridge hides its own far slope, and the tent reads as one flat sheet.
+  roof(m, SAND, 0.50, 0.50, 0.0, 0.95, 2.10, 2.60);                     // A-frame
+  box(m, SAND, 0.50, 0.50, 0.03, 2.10, 2.60, 0.06);                     // the groundsheet it sits on
+  m.tri(SLATE, [1.57, -0.70, 0.0], [1.57, 1.70, 0.0], [1.57, 0.50, 0.62]);  // the opening
+  tube(m, WOOD, 0.50, 0.50, 0.88, 1.24, 0.05, 0, 5, false, false);      // ridge pole
+}
+
+function pier(m) {
+  const w = 3.20;
+  box(m, WOOD, w / 2, 0.50, 0.30, w, 1.00, 0.10);                       // deck
+  for (const x of [0.28, 1.60, 2.92]) {
+    for (const y of [0.14, 0.86]) tube(m, WOOD, x, y, 0.0, 0.42, 0.10, 0.085, 6, true, false);
+    box(m, WOOD, x, 1.06, 0.62, 0.10, 0.10, 0.62);                      // rail posts
+  }
+  box(m, WOOD, w / 2, 1.06, 0.90, w, 0.07, 0.07);                       // rail
+}
+
+function watchtower(m) {
+  for (const [x, y] of [[0.14, 0.14], [0.14, 1.06], [1.06, 0.14], [1.06, 1.06]]) {
+    tube(m, WOOD, x, y, 0.0, 2.30, 0.11, 0.10, 6, true, false);         // legs
+  }
+  for (const z of [0.70, 1.50]) {                                       // cross braces
+    for (const y of [0.14, 1.06]) box(m, WOOD, 0.60, y, z, 0.94, 0.07, 0.07);
+    for (const x of [0.14, 1.06]) box(m, WOOD, x, 0.60, z, 0.07, 0.94, 0.07);
+  }
+  box(m, WOOD, 0.60, 0.60, 2.36, 1.32, 1.32, 0.12);                     // platform
+  for (const y of [0.01, 1.19]) box(m, WOOD, 0.60, y, 2.62, 1.30, 0.07, 0.46);   // railing
+  for (const x of [0.01, 1.19]) box(m, WOOD, x, 0.60, 2.62, 0.07, 1.30, 0.46);
+  box(m, WOOD, 0.60, 0.60, 2.94, 1.00, 1.00, 0.52);                     // hut
+  roof(m, SLATE, 0.60, 0.60, 3.18, 3.66, 1.20, 1.20);                   // overhanging roof
+  box(m, WOOD, -0.06, 0.42, 1.20, 0.07, 0.07, 2.20);                    // ladder rails
+  box(m, WOOD, -0.06, 0.82, 1.20, 0.07, 0.07, 2.20);
+  for (let z = 0.35; z < 2.05; z += 0.42) box(m, WOOD, -0.06, 0.62, z, 0.06, 0.46, 0.06);
+}
+
+function statue(m) {
+  box(m, SLATE, 0.50, 0.50, 0.16, 1.14, 1.14, 0.32);                    // plinth
+  box(m, SLATE, 0.50, 0.50, 0.38, 0.86, 0.86, 0.12);                    // step
+  tube(m, STONE, 0.50, 0.50, 0.44, 1.56, 0.36, 0.26, 8, true, false);   // robed figure
+  ball(m, STONE, 0.50, 0.50, 1.74, 0.21, 0.21, 0.23, 8, 3);             // head
+  for (const x of [0.22, 0.78]) box(m, STONE, x, 0.50, 1.24, 0.16, 0.16, 0.66);  // arms
+  box(m, SLATE, 0.78, 0.50, 1.82, 0.08, 0.08, 0.56);                    // staff, raised
+}
+
+function crate(m) {
+  box(m, WOOD, 0.50, 0.50, 0.44, 0.96, 0.96, 0.88);                     // the box
+  for (const x of [-0.01, 1.01]) box(m, DIRT, x, 0.50, 0.44, 0.10, 1.04, 0.92);  // corner battens,
+  for (const y of [-0.01, 1.01]) box(m, DIRT, 0.50, y, 0.44, 1.04, 0.10, 0.92);  // …proud of it
+}
+
+function barrel(m) {
+  tube(m, WOOD, 0.50, 0.50, 0.0, 0.34, 0.34, 0.42, 9, true, false);     // bottom half
+  tube(m, WOOD, 0.50, 0.50, 0.34, 0.68, 0.42, 0.34, 9, false, true);    // …and top
+  ring(m, SLATE, 0.50, 0.50, 0.08, 0.15, 0.44, 0.35, 9);                // hoops
+  ring(m, SLATE, 0.50, 0.50, 0.53, 0.60, 0.45, 0.38, 9);
+}
+
+function signpost(m) {
+  tube(m, WOOD, 0.50, 0.50, 0.0, 1.72, 0.10, 0.09, 6, true, true);      // post
+  ball(m, WOOD, 0.50, 0.50, 1.76, 0.11, 0.11, 0.10, 6, 3);              // cap
+  box(m, SAND, 0.84, 0.50, 1.44, 0.70, 0.09, 0.22);                     // board, pointing out
+  box(m, SAND, 0.50, 0.84, 1.14, 0.09, 0.70, 0.22);                     // and another
+}
+
+function lamp(m) {
+  tube(m, SLATE, 0.50, 0.50, 0.0, 0.18, 0.28, 0.22, 8, true, true);     // footing
+  tube(m, SLATE, 0.50, 0.50, 0.18, 1.86, 0.08, 0.07, 6, false, false);  // post
+  box(m, SLATE, 0.50, 0.50, 1.90, 0.34, 0.34, 0.12);                    // sill
+  box(m, SAND, 0.50, 0.50, 2.06, 0.26, 0.26, 0.32);                     // the light
+  dome(m, SLATE, 0.50, 0.50, 2.22, 0.29, 0.29, 0.18, 8, 2);             // cap
+}
+
+function palm(m) {
+  let x = 0.50;
+  for (let i = 0; i < 4; i++) {                                         // trunk, leaning
+    const x1 = x + 0.10;
+    tube(m, WOOD, (x + x1) / 2, 0.50, i * 0.55, (i + 1) * 0.55, 0.19 - i * 0.01, 0.17 - i * 0.01, 7, i === 0, false);
+    x = x1;
+  }
+  const cz = 2.20;
+  ball(m, LEAF, x, 0.50, cz + 0.05, 0.20, 0.20, 0.17, 6, 3);            // crown bud
+  for (let s = 0; s < 7; s++) {                                         // fronds, one cone each
+    const a = (2 * Math.PI * s) / 7 + 0.4;
+    log(m, LEAF, x, 0.50, x + 1.05 * Math.cos(a), 0.50 + 1.05 * Math.sin(a), cz, 0.17, 0, 5, false, false);
+  }
+  ball(m, DIRT, x + 0.16, 0.56, cz - 0.14, 0.11, 0.11, 0.11, 6, 3);     // coconuts
+  ball(m, DIRT, x - 0.10, 0.42, cz - 0.16, 0.11, 0.11, 0.11, 6, 3);
+}
+
+function haystack(m) {
+  tube(m, WOOD, 0.50, 0.50, 0.0, 0.98, 0.05, 0.04, 5, false, false);    // the pole it is built on
+  const heap = m.mark();
+  dome(m, SAND, 0.50, 0.50, 0.0, 0.78, 0.78, 0.88, 9, 3);
+  m.paint(heap, (f, i) => (i % 4 === 1 ? GRASS : null));                // straw flecks
+}
+
 /* ── placement ───────────────────────────────────────────────────────── */
 
 /** One vector turned a quarter turn about z. Exact: it only swaps and negates. */
@@ -530,6 +662,18 @@ define('ruins', 'Ruins', ruins);
 define('tree', 'Tree', tree);
 define('pine', 'Pine', pine);
 define('house', 'House', house);
+define('lighthouse', 'Lighthouse', lighthouse);
+define('windmill', 'Windmill', windmill);
+define('tent', 'Tent', tent);
+define('pier', 'Pier', pier);
+define('watchtower', 'Watchtower', watchtower);
+define('statue', 'Statue', statue);
+define('crate', 'Crate', crate);
+define('barrel', 'Barrel', barrel);
+define('signpost', 'Signpost', signpost);
+define('lamp', 'Lamp', lamp);
+define('palm', 'Palm', palm);
+define('haystack', 'Haystack', haystack);
 
 // Meshes baked from CC0 packs (see CREDITS.md and tools/import-pack.mjs). They
 // come after the authored models so the gallery reads hand-made first.

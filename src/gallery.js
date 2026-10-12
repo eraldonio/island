@@ -1,42 +1,65 @@
-// Model gallery: the panel of low-poly prefabs, each previewed with the same
-// projection and palette the world uses, so a card shows what you will get.
+// The prefab panels: cards of models and cards of preconfigured islands, each
+// previewed with the same projection and palette the world uses, so a card shows
+// what you will get.
+//
+// The two panels are the same card with a different painter. A model card fits
+// one low-poly mesh into its box with `paintModel`; an island card fits a whole
+// scene — relief, the elements standing on it and the notes lying on it — with
+// `paintScene`.
 
 import { MODELS, modelFrames } from './models.js';
-import { paintModel } from './render.js';
+import { ISLANDS, islandScene } from './islands.js';
+import { paintModel, paintScene } from './render.js';
 import { project, ISO } from './iso.js';
 
-const THUMB = 62;      // preview size in css px
-const PAD = 7;         // breathing room inside the preview
+const THUMB = 62;                    // model preview, css px (square)
+const PAD = 7;                       // breathing room inside a model preview
+const ISLE_W = 108, ISLE_H = 76;     // an island is wide and flat: so is its card
+const ISLE_PAD = 6;
 
-export class Gallery {
+/** Size a card's canvas for css `w`x`h` and hand back its context, set up. */
+function thumb(canvas, w, h) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  return ctx;
+}
+
+/** One card: a preview canvas, a name, and the click that picks it. */
+function card(root, entry, draw, pick) {
+  const el = document.createElement('button');
+  el.type = 'button';
+  el.className = 'mcard';
+  el.dataset.id = entry.id;
+  el.title = entry.title;
+  const canvas = document.createElement('canvas');
+  const name = document.createElement('span');
+  name.className = 'mname';
+  name.textContent = entry.name;
+  el.append(canvas, name);
+  el.addEventListener('click', () => pick(entry.id));
+  root.appendChild(el);
+  draw(canvas);
+  return el;
+}
+
+/** What both panels do with their cards: remember the pick, show or hide. */
+class Panel {
   constructor(root, { onPick }) {
     this.root = root;
     this.onPick = onPick;
-    this.id = MODELS.length ? MODELS[0].id : null;
+    this.id = null;
     this.cards = new Map();
-    this.build();
   }
 
-  get model() { return MODELS.find((m) => m.id === this.id) || null; }
-
-  build() {
-    for (const model of MODELS) {
-      const card = document.createElement('button');
-      card.type = 'button';
-      card.className = 'mcard';
-      card.dataset.id = model.id;
-      card.title = model.source ? `${model.name} — ${model.source}` : model.name;
-      const canvas = document.createElement('canvas');
-      const name = document.createElement('span');
-      name.className = 'mname';
-      name.textContent = model.name;
-      card.append(canvas, name);
-      card.addEventListener('click', () => this.pick(model.id));
-      this.root.appendChild(card);
-      this.cards.set(model.id, card);
-      this.preview(canvas, model);
-    }
-    this.select(this.id);
+  add(entry, draw) {
+    this.cards.set(entry.id, card(this.root, entry, draw, (id) => this.pick(id)));
+    if (this.id === null) this.id = entry.id;
   }
 
   pick(id) {
@@ -46,23 +69,30 @@ export class Gallery {
 
   select(id) {
     this.id = id;
-    for (const [key, card] of this.cards) card.classList.toggle('active', key === id);
+    for (const [key, el] of this.cards) el.classList.toggle('active', key === id);
   }
 
-  show(on) {
-    this.root.hidden = !on;
+  show(on) { this.root.hidden = !on; }
+}
+
+/** The model panel: one card per low-poly prefab. */
+export class Gallery extends Panel {
+  constructor(root, opts) {
+    super(root, opts);
+    for (const model of MODELS) {
+      this.add(
+        { id: model.id, name: model.name, title: model.source ? `${model.name} — ${model.source}` : model.name },
+        (canvas) => this.preview(canvas, model),
+      );
+    }
+    this.select(this.id);
   }
+
+  get model() { return MODELS.find((m) => m.id === this.id) || null; }
 
   /** Draw one model into its card, fitted and centred. */
   preview(canvas, model) {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.round(THUMB * dpr);
-    canvas.height = Math.round(THUMB * dpr);
-    canvas.style.width = THUMB + 'px';
-    canvas.style.height = THUMB + 'px';
-    const ctx = canvas.getContext('2d');
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, THUMB, THUMB);
+    const ctx = thumb(canvas, THUMB, THUMB);
 
     // Fit and centre on the model's own world-space bounds: the verts of its
     // first quarter turn, placed by the same origin offset the painters use.
@@ -83,5 +113,27 @@ export class Gallery {
     const oy = (THUMB - spanY * scale) / 2 - minY * scale;
 
     paintModel(ctx, frame, { view: ISO, scale, ox, oy });
+  }
+}
+
+/** The island panel: one card per preconfigured island, whole place previewed. */
+export class IslandGallery extends Panel {
+  constructor(root, opts) {
+    super(root, opts);
+    for (const island of ISLANDS) {
+      this.add(
+        { id: island.id, name: island.name, title: `${island.name} — ${island.blurb}` },
+        (canvas) => this.preview(canvas, island),
+      );
+    }
+    this.select(this.id);
+  }
+
+  get island() { return ISLANDS.find((i) => i.id === this.id) || null; }
+
+  /** Draw one island into its card: the whole scene, fitted and centred. */
+  preview(canvas, island) {
+    const ctx = thumb(canvas, ISLE_W, ISLE_H);
+    paintScene(ctx, islandScene(island), { view: ISO, w: ISLE_W, h: ISLE_H, pad: ISLE_PAD });
   }
 }

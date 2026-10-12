@@ -4,10 +4,12 @@ import { World, PALETTE, PAPER, CHAT_PAPER, seedStarter, uid, NOTE_NEW, FS_DEFAU
 import { Renderer } from './render.js';
 import { Notes, sanitizeHtml } from './notes.js';
 import { Harnesses, ChatWindow } from './harness.js';
-import { dropSession, dropAllSessions } from './omp.js';
+import { dropSession, dropAllSessions, setHostTools, setHostToolRunner } from './omp.js';
+import { HOST_TOOLS, bindHostTools, runHostTool } from './hosttools.js';
 import { raycast, unproject, viewOf, ISO, Z_MAX, SPIN0, TILT0, TILT_MAX } from './iso.js';
 import { targetsFor, BRUSHES } from './tools.js';
-import { Gallery } from './gallery.js';
+import { Gallery, IslandGallery } from './gallery.js';
+import { islandScene, islandParts } from './islands.js';
 import { MODELS, modelSize } from './models.js';
 import * as store from './store.js';
 
@@ -159,6 +161,23 @@ function deleteChat(id) {
   requestSave();
 }
 
+/**
+ * Take a note off the island the way the note's own `×` does. A harness can ask
+ * for this (island_remove), so the modal editor's copy of the text is dropped
+ * without writing back — the note it belongs to is going away.
+ */
+function deleteNote(id) {
+  if (editing && editing.id === id) {
+    editing = null;
+    $('editor').hidden = true;
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  }
+  notes.setEditing(id, false);
+  world.removeNote(id);
+  invalidate();
+  requestSave();
+}
+
 /* ── picking ─────────────────────────────────────────────────────────── */
 
 // Notes decide their own hover state from the pointer, because their toolbar
@@ -211,6 +230,15 @@ function ghostVisual(hit) {
       outline,
       cursor: null,
     };
+  }
+
+  if (state.tool === 'island') {
+    // The whole footprint the island claims, on the level its base plate lands
+    // on — the same blocks the stamp will take.
+    const t = islandTarget(hit);
+    return t
+      ? { hit, cells: [], tile: { x: t.x, y: t.y, w: t.w, h: t.h, level: t.z }, fill: 'rgba(120,220,255,0.20)', outline, cursor: null }
+      : { hit, cells: [], tile: null, fill: 'rgba(255,255,255,0.22)', outline, cursor: { x: hit.x, y: hit.y, z: hit.z, flat: hit.ground } };
   }
 
   if (state.tool === 'grab') {
@@ -447,6 +475,7 @@ function finishStroke(save) {
 /* ── placed models ───────────────────────────────────────────────────── */
 
 let gallery = null;
+let islandsPanel = null;
 
 /**
  * The block column a click targets: the neighbour of the face it hit, so a model
@@ -483,6 +512,42 @@ function placeStamp(hit) {
   if (!model) return;
   const t = stampTarget(hit);
   world.addProp({ id: uid(), model: model.id, x: t.x, y: t.y, z: t.z });
+  invalidate();
+  requestSave();
+}
+
+/**
+ * Where the selected island lands: its footprint centred on the block column the
+ * click targets, and its base plate at the level a block placed on that column
+ * would take — the same rule a single model is placed by, so the column under the
+ * cursor is the one that decides the height.
+ */
+function islandTarget(hit) {
+  const island = islandsPanel && islandsPanel.island;
+  if (!island) return null;
+  const scene = islandScene(island);
+  const col = columnTarget(hit);
+  return {
+    col,
+    scene,
+    x: col.x - ((scene.w - 1) >> 1),
+    y: col.y - ((scene.h - 1) >> 1),
+    w: scene.w,
+    h: scene.h,
+    z: world.surfaceUnder(col.x, col.y, 1, 1),
+  };
+}
+
+/**
+ * Stamp the selected island — its relief, the elements standing on it and its
+ * notes — where the click landed. The whole place is one undoable step, and
+ * nothing about it stays special once it is down: it is ordinary blocks, models
+ * and notes, so they can be dug, painted, moved and saved like anything else.
+ */
+function placeIsland(hit) {
+  const t = islandTarget(hit);
+  if (!t) return;
+  world.stamp(islandParts(t.scene, t.col.x, t.col.y, t.z));
   invalidate();
   requestSave();
 }
@@ -671,6 +736,10 @@ canvas.addEventListener('pointerdown', (e) => {
     placeStamp(pickAt(e.clientX, e.clientY));
     return;
   }
+  if (state.tool === 'island') {
+    placeIsland(pickAt(e.clientX, e.clientY));
+    return;
+  }
   if (state.tool === 'grab') {
     startPropDrag(e);
     return;
@@ -838,7 +907,7 @@ function createNote(hit) {
 
 /* ── toolbar / status ────────────────────────────────────────────────── */
 
-const TOOL_LABEL = { build: 'Build', dig: 'Dig', paint: 'Paint', note: 'Note', pan: 'Pan', stamp: 'Place', grab: 'Move', harness: 'Harness' };
+const TOOL_LABEL = { build: 'Build', dig: 'Dig', paint: 'Paint', note: 'Note', pan: 'Pan', stamp: 'Place', island: 'Island', grab: 'Move', harness: 'Harness' };
 
 function setText(el, str) {
   if (el.textContent !== str) el.textContent = str;
@@ -856,6 +925,7 @@ function setTool(tool) {
     hoverProp = null;
   }
   if (gallery) gallery.show(tool === 'stamp');
+  if (islandsPanel) islandsPanel.show(tool === 'island');
   invalidate();
 }
 
@@ -1104,6 +1174,7 @@ window.addEventListener('keydown', (e) => {
     case 'n': case 'N': setTool('note'); return;
     case 'h': case 'H': setTool('pan'); return;
     case 'm': case 'M': setTool('stamp'); return;
+    case 'i': case 'I': setTool('island'); return;
     case 'k': case 'K': setTool('harness'); return;
     case 'g': case 'G': setTool('grab'); return;
     case 'r': case 'R': {
@@ -1149,6 +1220,7 @@ window.addEventListener('beforeunload', () => {
 /* ── boot ────────────────────────────────────────────────────────────── */
 
 gallery = new Gallery($('gallery'), { onPick: () => setTool('stamp') });
+islandsPanel = new IslandGallery($('islands'), { onPick: () => setTool('island') });
 
 buildToolbar();
 buildActions();
@@ -1164,7 +1236,17 @@ if (saved) {
 
 invalidate();
 
+// How a harness tile touches the world. Every omp session the page spawns is
+// handed the tool surface in src/hosttools.js — look, terrain, notes, models,
+// islands, spawning another harness, removing things — and a call runs through
+// the same World methods a click does, so each one is a normal undoable edit.
+// A call that fails (an unknown model id, a missing note) comes back to the
+// model as a tool error instead of changing anything.
+bindHostTools({ world, cam, invalidate, requestSave, removeNote: deleteNote, removeChat: deleteChat });
+setHostTools(HOST_TOOLS);
+setHostToolRunner(runHostTool);
+
 // Scripting hook: every part of the app is reachable from the console, e.g.
 //   island.world.get(0, 0, 0)      island.cam.scale = 2
 //   island.world.apply([{ x: 0, y: 0, z: 5, mat: 2 }])
-window.island = { world, cam, state, renderer, notes, chats, chatWindow, invalidate, save: () => store.save(world, cam) };
+window.island = { world, cam, state, renderer, notes, chats, chatWindow, islands: islandsPanel, invalidate, save: () => store.save(world, cam) };

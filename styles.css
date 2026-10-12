@@ -124,6 +124,12 @@ body {
 .mcard canvas { display: block; width: 62px; height: 62px; }
 .mcard .mname { text-align: center; }
 
+/* The island panel stands beside the model list: one wider card per row, because
+   an island is a wide, flat thing and its name is a sentence. */
+.islands { left: 286px; grid-template-columns: 1fr; }
+.islands .mcard { padding: 5px 3px 6px; }
+.islands .mcard canvas { width: 108px; height: 76px; }
+
 /* ── sticky notes ────────────────────────────────────────────────────── */
 /* A note is a w*h block tile lying on the surface. Its paper quad is drawn by
    the renderer inside the voxel painter order; the DOM holds only the ink,

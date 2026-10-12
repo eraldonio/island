@@ -9,7 +9,7 @@
 
 import { Z_MIN, Z_MAX, CHUNK, project, unproject, ISO } from './iso.js';
 import { PALETTE, PAPER, CHAT_PAPER } from './world.js';
-import { MODELS, modelFrames } from './models.js';
+import { MODELS, modelFrames, modelSize } from './models.js';
 
 const MODELS_BY_ID = new Map(MODELS.map((m) => [m.id, m]));
 
@@ -39,6 +39,39 @@ export function toneStep(n) {
   return Math.round(Math.max(0, n[0] * LIGHT[0] + n[1] * LIGHT[1] + n[2] * LIGHT[2]) * TONE_STEPS);
 }
 export function toneColor(base, step) { return shade(base, 0.6 + 0.4 * step / TONE_STEPS); }
+
+// Contact shading for a block's top face, the second cue the two painters share.
+// A face's own tone says which way it faces, which is enough only while the
+// camera can see the face at all: the projection is parallel, so at a spin of a
+// quarter turn a whole family of side faces is exactly edge-on — it projects to
+// a line — and looking straight down the height scale goes to zero and every
+// riser vanishes with it. Both are poses where a hill would otherwise read as
+// flat colour. So the *ground* every top face sits on is shaded too: each of the
+// four horizontal neighbours darkens it in proportion to how far its surface
+// stands above, quantised to AO_STEPS like a diffuse tone. Flat ground is
+// untouched (every neighbour level with it), so relief reads as its own
+// contours from any angle — including the ones where nothing stands up.
+export const AO_DEPTH = 2;    // block layers above the face that count as full
+export const AO_STEPS = 4;    // quantised occlusion levels, like TONE_STEPS
+export function aoColor(base, occl) {
+  const k = Math.min(AO_STEPS, Math.max(0, occl));
+  return shade(base, 1 - 0.32 * k / AO_STEPS);
+}
+
+/**
+ * How much the terrain around a column shades its surface, 0 (open ground) to
+ * AO_STEPS (walled in on every side). `topAt` is the surface height of a column;
+ * only the four side neighbours count, so this is four lookups per *drawn top
+ * face* — a block only draws its top when it is its column's summit.
+ */
+export function occlusion(topAt, x, y, z) {
+  let o = 0;
+  o += Math.min(AO_DEPTH, topAt(x - 1, y) - z);
+  o += Math.min(AO_DEPTH, topAt(x + 1, y) - z);
+  o += Math.min(AO_DEPTH, topAt(x, y - 1) - z);
+  o += Math.min(AO_DEPTH, topAt(x, y + 1) - z);
+  return Math.max(0, Math.min(AO_STEPS, o));
+}
 
 /** Packed painter key: depth along the view ray, then insertion index. */
 function depthKey(x, y, z, v, n) {
@@ -152,6 +185,156 @@ export function paintModel(ctx, frame, { x = 0, y = 0, z = 0, view = ISO, scale 
   }
 }
 
+const PALETTE_COLORS = PALETTE.map((p) => p.color);
+
+/**
+ * Painter for a whole scene — relief, the elements standing on it and the notes
+ * lying on it — used for the cards of the preconfigured islands. It gathers
+ * every block face, element face and note quad into one painter order by the
+ * same depth rule the live renderer uses, and draws them far to near. Like
+ * `paintModel` it trades speed for being obviously correct: it runs once per
+ * card, not once per frame, so it can afford to walk everything.
+ */
+export function paintScene(ctx, scene, { view = ISO, w = 104, h = 78, pad = 6 } = {}) {
+  const v = view;
+  const solid = new Set();
+  for (const [x, y, z] of scene.voxels) solid.add(x + ',' + y + ',' + z);
+  const has = (x, y, z) => solid.has(x + ',' + y + ',' + z);
+  const topAt = (x, y) => {
+    for (let z = Z_MAX; z >= Z_MIN; z--) if (has(x, y, z)) return z;
+    return Z_MIN - 1;
+  };
+
+  // Fit: the world bounds of the relief and the elements. A model's mesh lives
+  // inside the whole blocks it claims, so the claimed boxes bound the scene.
+  let x0 = Infinity, y0 = Infinity, z0 = Infinity;
+  let x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+  const see = (x, y, z) => {
+    if (x < x0) x0 = x; if (x > x1) x1 = x;
+    if (y < y0) y0 = y; if (y > y1) y1 = y;
+    if (z < z0) z0 = z; if (z > z1) z1 = z;
+  };
+  for (const [x, y, z] of scene.voxels) { see(x, y, z); see(x + 1, y + 1, z + 1); }
+  for (const p of scene.props) {
+    const size = modelSize(MODELS_BY_ID.get(p.model), p.rot | 0);
+    see(p.x, p.y, p.z);
+    see(p.x + size.w, p.y + size.h, p.z + size.hz);
+  }
+
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const ax of [x0, x1]) {
+    for (const ay of [y0, y1]) {
+      for (const az of [z0, z1]) {
+        const q = project(ax, ay, az, v);
+        if (q.x < minX) minX = q.x;
+        if (q.x > maxX) maxX = q.x;
+        if (q.y < minY) minY = q.y;
+        if (q.y > maxY) maxY = q.y;
+      }
+    }
+  }
+  const spanX = Math.max(1e-6, maxX - minX);
+  const spanY = Math.max(1e-6, maxY - minY);
+  const scale = Math.min((w - 2 * pad) / spanX, (h - 2 * pad) / spanY);
+  const ox = (w - spanX * scale) / 2 - minX * scale;
+  const oy = (h - spanY * scale) / 2 - minY * scale;
+
+  const { U, V, W } = basisOf(v, scale);
+  const px = (x, y) => ox + (x * v.cos - y * v.sin) * v.H * scale;
+  const py = (x, y, z) => oy + ((x * v.sin + y * v.cos) * v.D - z * v.C) * scale;
+
+  const items = [];
+  for (const [x, y, z, mat] of scene.voxels) {
+    const up = has(x, y, z + 1);
+    const rt = !v.faceX || has(x + v.sx, y, z);
+    const lf = !v.faceY || has(x, y + v.sy, z);
+    if (up && rt && lf) continue;
+    items.push({ d: x * v.dx + y * v.dy + z * v.dz, kind: 0, x, y, z, mat, up, rt, lf });
+  }
+  for (const n of scene.notes) {
+    let level = Z_MIN - 1;
+    for (let i = 0; i < n.w; i++) {
+      for (let j = 0; j < n.h; j++) level = Math.max(level, topAt(n.x + i, n.y + j));
+    }
+    items.push({
+      d: (n.x + n.w) * v.dx + (n.y + n.h) * v.dy + level * v.dz,
+      kind: 1, note: n, level,
+    });
+  }
+  for (const p of scene.props) {
+    const model = MODELS_BY_ID.get(p.model);
+    if (!model) continue;
+    const frame = modelFrames(model)[(p.rot | 0) & 3];
+    const o = { x: p.x + frame.offset.x, y: p.y + frame.offset.y, z: p.z };
+    const bx = px(o.x, o.y);
+    const by = py(o.x, o.y, o.z);
+    for (const f of frame.faces) {
+      if (f.n[0] * v.dx + f.n[1] * v.dy + f.n[2] * v.dz <= 0) continue;   // back-face cull
+      items.push({
+        d: (o.x + f.c[0]) * v.dx + (o.y + f.c[1]) * v.dy + (o.z + f.c[2]) * v.dz,
+        kind: 2, f, frame, bx, by,
+      });
+    }
+  }
+  items.sort((a, b) => a.d - b.d);
+
+  ctx.lineWidth = 1;
+  ctx.lineJoin = 'round';
+  for (const it of items) {
+    if (it.kind === 1) {                            // a note lying on the surface
+      const n = it.note;
+      const paper = PAPER[((n.color | 0) % PAPER.length + PAPER.length) % PAPER.length];
+      const a = { x: px(n.x, n.y), y: py(n.x, n.y, it.level) };
+      ctx.fillStyle = paper;
+      ctx.strokeStyle = shade(paper, 0.7);
+      ctx.beginPath();
+      polyPath(ctx, [
+        a,
+        { x: a.x + U.x * n.w, y: a.y + U.y * n.w },
+        { x: a.x + U.x * n.w + V.x * n.h, y: a.y + U.y * n.w + V.y * n.h },
+        { x: a.x + V.x * n.h, y: a.y + V.y * n.h },
+      ]);
+      ctx.fill();
+      ctx.stroke();
+      continue;
+    }
+
+    if (it.kind === 2) {                            // an element's face
+      const c = toneColor(it.f.col, toneStep(it.f.n));
+      ctx.fillStyle = c;
+      ctx.strokeStyle = c;
+      ctx.beginPath();
+      const vs = it.f.v;
+      for (let i = 0; i < vs.length; i++) {
+        const p = it.frame.verts[vs[i]];
+        const sx = it.bx + p[0] * U.x + p[1] * V.x + p[2] * W.x;
+        const sy = it.by + p[0] * U.y + p[1] * V.y + p[2] * W.y;
+        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      continue;
+    }
+
+    const base = PALETTE_COLORS[it.mat] || '#8b929e';
+    const P0 = { x: px(it.x, it.y), y: py(it.x, it.y, it.z) };
+    const f = faceSet(P0, U, V, W, v);
+    const faces = [];
+    if (!it.up) faces.push(['top', aoColor(base, occlusion(topAt, it.x, it.y, it.z))]);
+    if (!it.rt && v.faceX) faces.push(['x', shade(base, v.sx > 0 ? 0.79 : 0.6)]);
+    if (!it.lf && v.faceY) faces.push(['y', shade(base, v.sy > 0 ? 0.6 : 0.79)]);
+    for (const [which, col] of faces) {
+      ctx.fillStyle = col;
+      ctx.strokeStyle = col;
+      ctx.beginPath();
+      polyPath(ctx, f[which]);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+}
+
 export class Renderer {
   constructor(canvas, world) {
     this.canvas = canvas;
@@ -160,12 +343,14 @@ export class Renderer {
     this.cam = { ox: 0, oy: 0, scale: 1, spin: 45, tilt: 30, view: ISO };
     this.hover = null;         // { hit, cells, tile, fill, outline, cursor }
     this.colors = PALETTE.map((p) => ({
-      top: p.color,
+      top: Array.from({ length: AO_STEPS + 1 }, (_, k) => aoColor(p.color, k)),
       right: shade(p.color, 0.79),
       left: shade(p.color, 0.6),
       raw: p.color,
     }));
     // Reused per-frame buffers (no allocation while panning).
+    // `masks` is one packed byte per voxel: which of its three faces are
+    // covered, plus its top face's occlusion level above bit 2.
     this.buf = {
       keys: [], kinds: [], notes: [], xs: [], ys: [], zs: [], mats: [], masks: [], ax: [], ay: [],
       // Model faces: one run of screen coords per entry, referenced by fstart/fcount.
@@ -304,6 +489,7 @@ export class Renderer {
     const { ox, oy, scale } = this.cam;
     const W_ = this.w;
     const H_ = this.h;
+    const topAt = (x, y) => world.topAt(x, y);
     let n = 0;
 
     // Bounding box of a box, relative to its origin corner, for culling.
@@ -341,7 +527,12 @@ export class Renderer {
 
         g.xs.push(x); g.ys.push(y); g.zs.push(z);
         g.mats.push(mat);
-        g.masks.push((up ? 1 : 0) | (rt ? 2 : 0) | (lf ? 4 : 0));
+        // The top face carries its contact shading in the mask too: `up`, `rt`,
+        // `lf` in the low three bits, the occlusion level (0…AO_STEPS) above
+        // them. Only a summit draws a top face, so only a summit has to ask the
+        // neighbours anything.
+        g.masks.push((up ? 1 : 0) | (rt ? 2 : 0) | (lf ? 4 : 0)
+          | (up ? 0 : occlusion(topAt, x, y, z) << 3));
         g.ax.push(ax); g.ay.push(ay);
         g.kinds.push(0); g.notes.push(0);
         g.fstart.push(0); g.fcount.push(0); g.fcol.push(0); g.fstep.push(0);
@@ -502,8 +693,9 @@ export class Renderer {
       const col = this.colors[g.mats[k]];
       const f = faceSet(P0, U, V, W, v);
 
-      if (!(m & 1)) {                             // top
-        if (col.top !== style) { ctx.fillStyle = style = col.top; ctx.strokeStyle = style; }
+      if (!(m & 1)) {                             // top, in its contact tone
+        const c = col.top[m >> 3];
+        if (c !== style) { ctx.fillStyle = style = c; ctx.strokeStyle = style; }
         ctx.beginPath();
         polyPath(ctx, f.top);
         ctx.fill(); ctx.stroke();
